@@ -5,6 +5,7 @@ package switchpanel
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	hid "github.com/sstallion/go-hid"
 )
@@ -64,11 +65,12 @@ type SwitchEvent struct {
 
 // Panel represents the Saitek Flight Switch Panel.
 type Panel struct {
-	dev      *hid.Device
-	switchCh chan SwitchEvent
-	quit     chan struct{}
-	mu       sync.Mutex
-	ledState byte
+	dev          *hid.Device
+	switchCh     chan SwitchEvent
+	quit         chan struct{}
+	mu           sync.Mutex
+	ledState     byte
+	initialState [3]byte
 }
 
 // Open opens the switch panel. Returns an error if the device is not found.
@@ -86,6 +88,11 @@ func Open() (*Panel, error) {
 		switchCh: make(chan SwitchEvent, 32),
 		quit:     make(chan struct{}),
 	}
+	buf := make([]byte, 4)
+	if n, err := p.dev.ReadWithTimeout(buf, 300*time.Millisecond); err == nil && n >= 3 {
+		copy(p.initialState[:], buf[n-3:n])
+	}
+
 	go p.readLoop()
 	return p, nil
 }
@@ -154,7 +161,19 @@ var switchBits = [...]struct{ byteIdx, bit int }{
 
 func (p *Panel) readLoop() {
 	buf := make([]byte, 4) // hidapi may prepend a report ID byte
-	var prev [3]byte
+	prev := p.initialState
+
+	// Emit "on" events for all switches already active at startup.
+	for id := range switchBits {
+		bi := switchBits[id].byteIdx
+		bit := uint(switchBits[id].bit)
+		if (prev[bi]>>bit)&1 == 1 {
+			select {
+			case p.switchCh <- SwitchEvent{Switch: SwitchID(id), On: true}:
+			default:
+			}
+		}
+	}
 
 	for {
 		select {
