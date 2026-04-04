@@ -172,26 +172,6 @@ func main() {
 	log.Println("kRPC connected.")
 
 	sc := spacecenter.New(client)
-	log.Println("Waiting for active vessel...")
-	var vessel *spacecenter.Vessel
-	for {
-		vessel, err = sc.ActiveVessel()
-		if err == nil {
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-	name, _ := vessel.Name()
-	log.Printf("Active vessel: %s", name)
-
-	control, err := vessel.Control()
-	if err != nil {
-		log.Fatalf("Control: %v", err)
-	}
-
-	if swPanel != nil {
-		swPanel.SetLEDs(0)
-	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -200,41 +180,107 @@ func main() {
 	if swPanel != nil {
 		swCh = swPanel.SwitchCh()
 	}
-
-	rot1Mode := "COM1"
-	rot2Mode := "COM1"
 	var radioCh <-chan radiopanel.SwitchEvent
 	if radioPanel != nil {
 		radioCh = radioPanel.SwitchCh()
 	}
 
-	log.Println("Ready.")
-
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	// rot modes persist across missions — they reflect the physical rotary position.
+	rot1Mode := "COM1"
+	rot2Mode := "COM1"
+
 	for {
-		select {
-		case <-sigCh:
+		vessel, control := waitForVessel(sc, swPanel)
+
+		log.Println("Ready.")
+		vesselLost := runSession(ctx, vessel, control, swPanel, radioPanel, cfg,
+			swCh, radioCh, ticker.C, sigCh, &rot1Mode, &rot2Mode)
+
+		if !vesselLost {
+			// Clean shutdown via signal.
 			log.Println("Shutting down...")
 			if swPanel != nil {
 				swPanel.SetLEDs(0)
 			}
 			cancelCtx()
 			return
+		}
+		log.Println("Vessel lost. Waiting for new mission...")
+	}
+}
+
+// waitForVessel blocks until an active vessel is available in KSP.
+func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel) (*spacecenter.Vessel, *spacecenter.Control) {
+	log.Println("Waiting for active vessel...")
+	for {
+		vessel, err := sc.ActiveVessel()
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		control, err := vessel.Control()
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		name, _ := vessel.Name()
+		log.Printf("Active vessel: %s", name)
+		if swPanel != nil {
+			swPanel.SetLEDs(0)
+		}
+		return vessel, control
+	}
+}
+
+// runSession runs the main event loop for a single active vessel.
+// Returns true if the vessel was lost (new mission), false on clean shutdown.
+func runSession(
+	ctx context.Context,
+	vessel *spacecenter.Vessel,
+	control *spacecenter.Control,
+	swPanel *switchpanel.Panel,
+	radioPanel *radiopanel.Panel,
+	cfg *config.Config,
+	swCh <-chan switchpanel.SwitchEvent,
+	radioCh <-chan radiopanel.SwitchEvent,
+	tickC <-chan time.Time,
+	sigCh <-chan os.Signal,
+	rot1Mode, rot2Mode *string,
+) bool {
+	errCount := 0
+	const maxErrors = 3
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-sigCh:
+			return false
 
 		case ev := <-swCh:
 			handleSwitch(ev, cfg.Switches, control)
 
 		case ev := <-radioCh:
-			handleRadioSwitch(ev, &rot1Mode, &rot2Mode)
+			handleRadioSwitch(ev, rot1Mode, rot2Mode)
 
-		case <-ticker.C:
-			if swPanel != nil {
-				syncLEDs(control, swPanel)
+		case <-tickC:
+			tickOK := true
+			if swPanel != nil && !syncLEDs(control, swPanel) {
+				tickOK = false
 			}
-			if radioPanel != nil {
-				updateDisplays(radioPanel, vessel, control, rot1Mode, rot2Mode, cfg.Radio)
+			if radioPanel != nil && !updateDisplays(radioPanel, vessel, control, *rot1Mode, *rot2Mode, cfg.Radio) {
+				tickOK = false
+			}
+			if !tickOK {
+				errCount++
+				if errCount >= maxErrors {
+					return true // vessel lost
+				}
+			} else {
+				errCount = 0
 			}
 		}
 	}
@@ -300,24 +346,25 @@ func handleRadioSwitch(ev radiopanel.SwitchEvent, rot1Mode, rot2Mode *string) {
 }
 
 // updateDisplays writes telemetry to the radio panel based on current rotary modes.
+// Returns false if the vessel reference appears to be invalid.
 func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spacecenter.Control,
-	rot1Mode, rot2Mode string, radioCfg map[string][]string) {
+	rot1Mode, rot2Mode string, radioCfg map[string][]string) bool {
 
 	orbit, err := vessel.Orbit()
 	if err != nil {
-		return
+		return false
 	}
 	body, err := orbit.Body()
 	if err != nil {
-		return
+		return false
 	}
 	bodyRef, err := body.ReferenceFrame()
 	if err != nil {
-		return
+		return false
 	}
 	flight, err := vessel.Flight(bodyRef)
 	if err != nil {
-		return
+		return false
 	}
 
 	var navSpeed float64
@@ -333,6 +380,7 @@ func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spac
 		radiopanel.Display1Active, radiopanel.Display1Standby)
 	writeDisplayPair(rp, flight, orbit, navSpeed, radioCfg, rot2Mode,
 		radiopanel.Display2Active, radiopanel.Display2Standby)
+	return true
 }
 
 // writeDisplayPair writes the left/right telemetry values for a given mode onto two displays.
@@ -378,16 +426,19 @@ func writeDisplay(rp *radiopanel.Panel, display radiopanel.DisplayID, spec confi
 	}
 }
 
-func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel) {
+// syncLEDs updates the landing gear LEDs to reflect the current gear state.
+// Returns false if the vessel reference appears to be invalid.
+func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel) bool {
 	deployed, err := ctrl.Gear()
 	if err != nil {
-		return
+		return false
 	}
 	if deployed {
 		panel.SetLEDs(switchpanel.LEDAllGreen)
 	} else {
 		panel.SetLEDs(switchpanel.LEDAllRed)
 	}
+	return true
 }
 
 func radioModeName(id radiopanel.SwitchID) string {
