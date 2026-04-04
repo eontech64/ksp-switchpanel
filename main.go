@@ -7,20 +7,133 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	krpcgo "github.com/atburke/krpc-go"
 	"github.com/atburke/krpc-go/spacecenter"
 
+	"ksp-switchpanel/config"
 	"ksp-switchpanel/radiopanel"
 	"ksp-switchpanel/switchpanel"
 )
 
+// switchConfigName maps each SwitchID to its key in the [switches] config section.
+var switchConfigName = map[switchpanel.SwitchID]string{
+	switchpanel.SwBat:        "BAT",
+	switchpanel.SwAlternator: "ALT",
+	switchpanel.SwAvionics:   "AVIONICS",
+	switchpanel.SwFuel:       "FUEL",
+	switchpanel.SwDeice:      "DEICE",
+	switchpanel.SwPitot:      "PITOT",
+	switchpanel.SwCowl:       "COWL",
+	switchpanel.SwPanel:      "PANEL",
+	switchpanel.SwBeacon:     "BEACON",
+	switchpanel.SwNav:        "NAV",
+	switchpanel.SwStrobe:     "STROBE",
+	switchpanel.SwTaxi:       "TAXI",
+	switchpanel.SwLanding:    "LANDING",
+	switchpanel.GearUp:       "GEAR_UP",
+	switchpanel.GearDown:     "GEAR_DOWN",
+	switchpanel.RotStart:     "ROT_START",
+}
+
+// rotaryModeName maps each radio rotary SwitchID to its mode name used in [radio] config.
+// Both rows share the same mode names (COM1, NAV1, etc.).
+var rotaryModeName = map[radiopanel.SwitchID]string{
+	radiopanel.Rot1COM1: "COM1", radiopanel.Rot2COM1: "COM1",
+	radiopanel.Rot1COM2: "COM2", radiopanel.Rot2COM2: "COM2",
+	radiopanel.Rot1NAV1: "NAV1", radiopanel.Rot2NAV1: "NAV1",
+	radiopanel.Rot1NAV2: "NAV2", radiopanel.Rot2NAV2: "NAV2",
+	radiopanel.Rot1ADF:  "ADF",  radiopanel.Rot2ADF:  "ADF",
+	radiopanel.Rot1DME:  "DME",  radiopanel.Rot2DME:  "DME",
+	radiopanel.Rot1XPDR: "XPDR", radiopanel.Rot2XPDR: "XPDR",
+}
+
+// rot1Switch is true for SwitchIDs that belong to the top radio row.
+var rot1Switch = map[radiopanel.SwitchID]bool{
+	radiopanel.Rot1COM1: true, radiopanel.Rot1COM2: true,
+	radiopanel.Rot1NAV1: true, radiopanel.Rot1NAV2: true,
+	radiopanel.Rot1ADF:  true, radiopanel.Rot1DME:  true,
+	radiopanel.Rot1XPDR: true,
+}
+
+// telemetryFn is a function that reads one telemetry value from the current flight state.
+type telemetryFn func(f *spacecenter.Flight, o *spacecenter.Orbit, navSpeed float64) (float64, error)
+
+// telemetryFns is the registry of field names available in the [radio] config.
+var telemetryFns = map[string]telemetryFn{
+	"altitude_km": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := f.MeanAltitude()
+		return v / 1000, err
+	},
+	"vspeed": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		return f.VerticalSpeed()
+	},
+	"apoapsis_km": func(_ *spacecenter.Flight, o *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := o.ApoapsisAltitude()
+		return v / 1000, err
+	},
+	"periapsis_km": func(_ *spacecenter.Flight, o *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := o.PeriapsisAltitude()
+		return v / 1000, err
+	},
+	"speed_kts": func(_ *spacecenter.Flight, _ *spacecenter.Orbit, ns float64) (float64, error) {
+		return ns * 1.94384, nil
+	},
+	"speed_ms": func(_ *spacecenter.Flight, _ *spacecenter.Orbit, ns float64) (float64, error) {
+		return ns, nil
+	},
+	"orbital_speed": func(_ *spacecenter.Flight, o *spacecenter.Orbit, _ float64) (float64, error) {
+		return o.Speed()
+	},
+	"heading": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := f.Heading()
+		return float64(v), err
+	},
+	"pitch": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := f.Pitch()
+		return float64(v), err
+	},
+	"roll": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := f.Roll()
+		return float64(v), err
+	},
+	"latitude": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		return f.Latitude()
+	},
+	"longitude": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		return f.Longitude()
+	},
+	"gforce": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := f.GForce()
+		return float64(v), err
+	},
+	"dynpressure": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := f.DynamicPressure()
+		return float64(v), err
+	},
+	"time_to_apo": func(_ *spacecenter.Flight, o *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := o.TimeToApoapsis()
+		return math.Abs(v), err
+	},
+	"time_to_peri": func(_ *spacecenter.Flight, o *spacecenter.Orbit, _ float64) (float64, error) {
+		v, err := o.TimeToPeriapsis()
+		return math.Abs(v), err
+	},
+}
+
 func main() {
 	log.Printf("KSP panels bridge v%s starting...", version)
 
-	// Connect to the switch panel (optional)
+	cfg, err := config.FindAndLoad()
+	if err != nil {
+		log.Fatalf("Config: %v", err)
+	}
+	log.Println("Configuration loaded.")
+
 	log.Println("Connecting to Switch Panel...")
 	swPanel, err := switchpanel.Open()
 	if err != nil {
@@ -31,7 +144,6 @@ func main() {
 		defer swPanel.Close()
 	}
 
-	// Connect to the radio panel (optional)
 	log.Println("Connecting to Radio Panel...")
 	radioPanel, err := radiopanel.Open()
 	if err != nil {
@@ -46,7 +158,6 @@ func main() {
 		log.Fatal("No panels found. Connect at least one panel and try again.")
 	}
 
-	// Connect to kRPC
 	log.Println("Connecting to kRPC server...")
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
@@ -82,7 +193,6 @@ func main() {
 		swPanel.SetLEDs(0)
 	}
 
-	// Handle OS signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -91,9 +201,8 @@ func main() {
 		swCh = swPanel.SwitchCh()
 	}
 
-	// Radio panel state: which telemetry mode each rotary is set to
-	rot1Mode := radiopanel.Rot1COM1 // top displays
-	rot2Mode := radiopanel.Rot2COM1 // bottom displays
+	rot1Mode := "COM1"
+	rot2Mode := "COM1"
 	var radioCh <-chan radiopanel.SwitchEvent
 	if radioPanel != nil {
 		radioCh = radioPanel.SwitchCh()
@@ -101,7 +210,6 @@ func main() {
 
 	log.Println("Ready.")
 
-	// Telemetry ticker: update radio panel displays
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -116,7 +224,7 @@ func main() {
 			return
 
 		case ev := <-swCh:
-			handleSwitch(ev, control, swPanel)
+			handleSwitch(ev, cfg.Switches, control)
 
 		case ev := <-radioCh:
 			handleRadioSwitch(ev, &rot1Mode, &rot2Mode)
@@ -126,82 +234,75 @@ func main() {
 				syncLEDs(control, swPanel)
 			}
 			if radioPanel != nil {
-				updateDisplays(radioPanel, vessel, control, rot1Mode, rot2Mode)
+				updateDisplays(radioPanel, vessel, control, rot1Mode, rot2Mode, cfg.Radio)
 			}
 		}
 	}
 }
 
-// handleSwitch maps switch panel events to kRPC actions.
-func handleSwitch(ev switchpanel.SwitchEvent, ctrl *spacecenter.Control, panel *switchpanel.Panel) {
+// handleSwitch dispatches a switch event to the corresponding kRPC action from config.
+func handleSwitch(ev switchpanel.SwitchEvent, switchCfg map[string]string, ctrl *spacecenter.Control) {
+	name, ok := switchConfigName[ev.Switch]
+	if !ok {
+		return
+	}
+	action, ok := switchCfg[name]
+	if !ok || action == "none" || action == "" {
+		return
+	}
+
 	on := ev.On
-	switch ev.Switch {
-	case switchpanel.SwBat:
-		log.Printf("BAT -> RCS: %v", on)
+	switch {
+	case action == "rcs":
+		log.Printf("%s -> RCS: %v", name, on)
 		ctrl.SetRCS(on)
-	case switchpanel.SwAlternator:
-		log.Printf("ALT -> SAS: %v", on)
+	case action == "sas":
+		log.Printf("%s -> SAS: %v", name, on)
 		ctrl.SetSAS(on)
-	case switchpanel.SwAvionics:
-		ctrl.SetActionGroup(1, on)
-	case switchpanel.SwFuel:
-		ctrl.SetActionGroup(2, on)
-	case switchpanel.SwDeice:
-		ctrl.SetActionGroup(3, on)
-	case switchpanel.SwPitot:
-		ctrl.SetActionGroup(4, on)
-	case switchpanel.SwCowl:
-		ctrl.SetActionGroup(5, on)
-	case switchpanel.SwPanel:
-		ctrl.SetActionGroup(6, on)
-	case switchpanel.SwBeacon:
-		ctrl.SetActionGroup(7, on)
-	case switchpanel.SwNav:
-		ctrl.SetActionGroup(8, on)
-	case switchpanel.SwStrobe:
-		ctrl.SetActionGroup(9, on)
-	case switchpanel.SwTaxi:
-		ctrl.SetActionGroup(10, on)
-	case switchpanel.SwLanding:
-		log.Printf("LANDING -> Brakes: %v", on)
+	case action == "brakes":
+		log.Printf("%s -> Brakes: %v", name, on)
 		ctrl.SetBrakes(on)
-	case switchpanel.GearDown:
-		if on {
-			log.Println("GEAR DOWN -> Deploy gear")
-			ctrl.SetGear(true)
+	case action == "gear_down" && on:
+		log.Printf("%s -> Gear DOWN", name)
+		ctrl.SetGear(true)
+	case action == "gear_up" && on:
+		log.Printf("%s -> Gear UP", name)
+		ctrl.SetGear(false)
+	case action == "next_stage" && on:
+		log.Printf("%s -> Next stage", name)
+		ctrl.ActivateNextStage()
+	case strings.HasPrefix(action, "action_group:"):
+		n, err := strconv.Atoi(strings.TrimPrefix(action, "action_group:"))
+		if err != nil {
+			log.Printf("Invalid action_group in config for %s: %q", name, action)
+			return
 		}
-	case switchpanel.GearUp:
-		if on {
-			log.Println("GEAR UP -> Retract gear")
-			ctrl.SetGear(false)
-		}
-	case switchpanel.RotStart:
-		if on {
-			log.Println("ROT START -> Next stage!")
-			ctrl.ActivateNextStage()
-		}
+		ctrl.SetActionGroup(uint32(n), on)
 	}
 }
 
-// handleRadioSwitch tracks rotary position changes to update display modes.
-func handleRadioSwitch(ev radiopanel.SwitchEvent, rot1Mode, rot2Mode *radiopanel.SwitchID) {
+// handleRadioSwitch tracks which telemetry mode each rotary row is set to.
+func handleRadioSwitch(ev radiopanel.SwitchEvent, rot1Mode, rot2Mode *string) {
 	if !ev.On {
 		return
 	}
-	switch ev.Switch {
-	case radiopanel.Rot1COM1, radiopanel.Rot1COM2, radiopanel.Rot1NAV1,
-		radiopanel.Rot1NAV2, radiopanel.Rot1ADF, radiopanel.Rot1DME, radiopanel.Rot1XPDR:
-		*rot1Mode = ev.Switch
-		log.Printf("Radio top mode: %s", radioModeName(ev.Switch))
-	case radiopanel.Rot2COM1, radiopanel.Rot2COM2, radiopanel.Rot2NAV1,
-		radiopanel.Rot2NAV2, radiopanel.Rot2ADF, radiopanel.Rot2DME, radiopanel.Rot2XPDR:
-		*rot2Mode = ev.Switch
-		log.Printf("Radio bottom mode: %s", radioModeName(ev.Switch))
+	modeName, ok := rotaryModeName[ev.Switch]
+	if !ok {
+		return
+	}
+	if rot1Switch[ev.Switch] {
+		*rot1Mode = modeName
+		log.Printf("Radio top -> %s", modeName)
+	} else {
+		*rot2Mode = modeName
+		log.Printf("Radio bottom -> %s", modeName)
 	}
 }
 
 // updateDisplays writes telemetry to the radio panel based on current rotary modes.
-func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spacecenter.Control, rot1Mode, rot2Mode radiopanel.SwitchID) {
+func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spacecenter.Control,
+	rot1Mode, rot2Mode string, radioCfg map[string][]string) {
+
 	orbit, err := vessel.Orbit()
 	if err != nil {
 		return
@@ -219,7 +320,6 @@ func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spac
 		return
 	}
 
-	// Match the navball speed: surface or orbital depending on current mode.
 	var navSpeed float64
 	if speedMode, err := ctrl.SpeedMode(); err == nil {
 		if speedMode == spacecenter.SpeedMode_Orbit {
@@ -229,99 +329,53 @@ func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spac
 		}
 	}
 
-	writeModePair(rp, flight, orbit, navSpeed, rot1Mode, radiopanel.Display1Active, radiopanel.Display1Standby)
-	writeModePair(rp, flight, orbit, navSpeed, rot2Mode, radiopanel.Display2Active, radiopanel.Display2Standby)
+	writeDisplayPair(rp, flight, orbit, navSpeed, radioCfg, rot1Mode,
+		radiopanel.Display1Active, radiopanel.Display1Standby)
+	writeDisplayPair(rp, flight, orbit, navSpeed, radioCfg, rot2Mode,
+		radiopanel.Display2Active, radiopanel.Display2Standby)
 }
 
-// writeModePair writes the left/right value pair for a given mode onto the two displays.
-func writeModePair(rp *radiopanel.Panel, flight *spacecenter.Flight, orbit *spacecenter.Orbit,
-	navSpeed float64, mode radiopanel.SwitchID, left, right radiopanel.DisplayID) {
+// writeDisplayPair writes the left/right telemetry values for a given mode onto two displays.
+func writeDisplayPair(rp *radiopanel.Panel, flight *spacecenter.Flight, orbit *spacecenter.Orbit,
+	navSpeed float64, radioCfg map[string][]string, mode string,
+	left, right radiopanel.DisplayID) {
 
-	switch mode {
-	case radiopanel.Rot1COM1, radiopanel.Rot2COM1:
-		// Altitude (km, 1 decimal) | Vertical speed (m/s)
-		if v, err := flight.MeanAltitude(); err == nil {
-			rp.DisplayFloat(left, v/1000, 1)
-		}
-		if v, err := flight.VerticalSpeed(); err == nil {
-			rp.DisplayInt(right, int(v))
-		}
-
-	case radiopanel.Rot1COM2, radiopanel.Rot2COM2:
-		// Apoapsis (km) | Periapsis (km)
-		if v, err := orbit.ApoapsisAltitude(); err == nil {
-			rp.DisplayInt(left, int(v/1000))
-		}
-		if v, err := orbit.PeriapsisAltitude(); err == nil {
-			rp.DisplayInt(right, int(v/1000))
-		}
-
-	case radiopanel.Rot1NAV1, radiopanel.Rot2NAV1:
-		// Speed (knots, navball) | Heading (°)
-		rp.DisplayInt(left, int(navSpeed*1.94384))
-		if v, err := flight.Heading(); err == nil {
-			rp.DisplayInt(right, int(v))
-		}
-
-	case radiopanel.Rot1NAV2, radiopanel.Rot2NAV2:
-		// Pitch (°) | Roll (°)
-		if v, err := flight.Pitch(); err == nil {
-			rp.DisplayFloat(left, float64(v), 1)
-		}
-		if v, err := flight.Roll(); err == nil {
-			rp.DisplayFloat(right, float64(v), 1)
-		}
-
-	case radiopanel.Rot1ADF, radiopanel.Rot2ADF:
-		// Latitude | Longitude
-		if v, err := flight.Latitude(); err == nil {
-			rp.DisplayFloat(left, v, 2)
-		}
-		if v, err := flight.Longitude(); err == nil {
-			rp.DisplayFloat(right, v, 2)
-		}
-
-	case radiopanel.Rot1DME, radiopanel.Rot2DME:
-		// G-Force | Dynamic pressure (Pa)
-		if v, err := flight.GForce(); err == nil {
-			rp.DisplayFloat(left, float64(v), 2)
-		}
-		if v, err := flight.DynamicPressure(); err == nil {
-			rp.DisplayInt(right, int(v))
-		}
-
-	case radiopanel.Rot1XPDR, radiopanel.Rot2XPDR:
-		// Time to apoapsis (s) | Time to periapsis (s)
-		if v, err := orbit.TimeToApoapsis(); err == nil {
-			rp.DisplayInt(left, int(math.Abs(v)))
-		}
-		if v, err := orbit.TimeToPeriapsis(); err == nil {
-			rp.DisplayInt(right, int(math.Abs(v)))
-		}
+	specs, ok := radioCfg[mode]
+	if !ok || len(specs) < 2 {
+		return
 	}
+	leftSpec, err := config.ParseDisplaySpec(specs[0])
+	if err != nil {
+		log.Printf("Radio config [%s] left: %v", mode, err)
+		return
+	}
+	rightSpec, err := config.ParseDisplaySpec(specs[1])
+	if err != nil {
+		log.Printf("Radio config [%s] right: %v", mode, err)
+		return
+	}
+	writeDisplay(rp, left, leftSpec, flight, orbit, navSpeed)
+	writeDisplay(rp, right, rightSpec, flight, orbit, navSpeed)
 }
 
-func radioModeName(id radiopanel.SwitchID) string {
-	names := map[radiopanel.SwitchID]string{
-		radiopanel.Rot1COM1: "Alt (km) / VSpeed (m/s)",
-		radiopanel.Rot1COM2: "Apo / Peri (km)",
-		radiopanel.Rot1NAV1: "Speed (kts, navball) / Heading",
-		radiopanel.Rot1NAV2: "Pitch / Roll",
-		radiopanel.Rot1ADF:  "Lat / Lon",
-		radiopanel.Rot1DME:  "G-Force / DynPres",
-		radiopanel.Rot1XPDR: "T-Apo / T-Peri",
-		radiopanel.Rot2COM1: "Alt (km) / VSpeed (m/s)",
-		radiopanel.Rot2COM2: "Apo / Peri (km)",
-		radiopanel.Rot2NAV1: "Speed (kts, navball) / Heading",
-		radiopanel.Rot2NAV2: "Pitch / Roll",
-		radiopanel.Rot2ADF:  "Lat / Lon",
-		radiopanel.Rot2DME:  "G-Force / DynPres",
-		radiopanel.Rot2XPDR: "T-Apo / T-Peri",
+// writeDisplay reads one telemetry field and writes it to a single display.
+func writeDisplay(rp *radiopanel.Panel, display radiopanel.DisplayID, spec config.DisplaySpec,
+	flight *spacecenter.Flight, orbit *spacecenter.Orbit, navSpeed float64) {
+
+	fn, ok := telemetryFns[spec.Field]
+	if !ok {
+		log.Printf("Unknown telemetry field %q", spec.Field)
+		return
 	}
-	if s, ok := names[id]; ok {
-		return s
+	v, err := fn(flight, orbit, navSpeed)
+	if err != nil {
+		return
 	}
-	return fmt.Sprintf("mode %d", id)
+	if spec.Decimals == 0 {
+		rp.DisplayInt(display, int(v))
+	} else {
+		rp.DisplayFloat(display, v, spec.Decimals)
+	}
 }
 
 func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel) {
@@ -334,4 +388,11 @@ func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel) {
 	} else {
 		panel.SetLEDs(switchpanel.LEDAllRed)
 	}
+}
+
+func radioModeName(id radiopanel.SwitchID) string {
+	if name, ok := rotaryModeName[id]; ok {
+		return name
+	}
+	return fmt.Sprintf("mode %d", id)
 }

@@ -34,9 +34,62 @@ go build -o ksp-switchpanel .
 
 The program detects which panels are connected, waits automatically until a vessel is active in KSP, and reads the initial switch/rotary positions on startup. Press **Ctrl+C** to exit cleanly.
 
+## Configuration
+
+Switch actions and radio display modes can be customised by editing **`panels.toml`**, placed next to the binary (or in the directory where you run it). If the file is absent, built-in defaults are used — identical to the table below.
+
+```toml
+[switches]
+BAT      = "rcs"
+ALT      = "sas"
+AVIONICS = "action_group:1"
+# ...
+
+[radio]
+COM1 = ["altitude_km:1", "vspeed:0"]
+NAV1 = ["speed_kts:0",   "heading:0"]
+# ...
+```
+
+A fully-commented `panels.toml` with all options is included in the repository.
+
+### Available switch actions
+
+| Value | Effect |
+|---|---|
+| `rcs` | Toggle RCS thrusters |
+| `sas` | Toggle SAS autopilot |
+| `brakes` | Toggle brakes |
+| `gear_down` | Deploy landing gear (on activation only) |
+| `gear_up` | Retract landing gear (on activation only) |
+| `next_stage` | Activate next stage (on activation only) |
+| `action_group:N` | Toggle action group N (1–10) |
+| `none` | No action |
+
+### Available telemetry fields (radio displays)
+
+| Field | Description |
+|---|---|
+| `altitude_km` | Mean altitude (km) |
+| `vspeed` | Vertical speed (m/s) |
+| `apoapsis_km` | Apoapsis altitude (km) |
+| `periapsis_km` | Periapsis altitude (km) |
+| `speed_kts` | Navball speed (knots) |
+| `speed_ms` | Navball speed (m/s) |
+| `orbital_speed` | Orbital speed (m/s) |
+| `heading` | Compass heading (°) |
+| `pitch` | Pitch angle (°) |
+| `roll` | Roll angle (°) |
+| `latitude` | Latitude (°) |
+| `longitude` | Longitude (°) |
+| `gforce` | G-force |
+| `dynpressure` | Dynamic pressure (Pa) |
+| `time_to_apo` | Time to apoapsis (s) |
+| `time_to_peri` | Time to periapsis (s) |
+
 ## Flight Switch Panel
 
-### Switch mapping
+### Default switch mapping
 
 | Panel switch | KSP action |
 |---|---|
@@ -66,6 +119,8 @@ The N/L/R LEDs sync automatically with the vessel's gear state every 500ms:
 ## Flight Radio Panel
 
 The four 5-digit displays show live telemetry from KSP. Each rotary switch selects what its pair of displays shows — **Rotary 1** controls the top displays, **Rotary 2** the bottom displays.
+
+### Default display modes
 
 | Rotary position | Left display | Right display |
 |---|---|---|
@@ -102,6 +157,9 @@ On macOS, `libusb` cannot claim HID device interfaces because they are already o
 .
 ├── main.go                  # Main loop: reads panels, calls kRPC
 ├── version.go               # Version constant and changelog
+├── panels.toml              # Configuration file (optional, editable)
+├── config/
+│   └── config.go            # Config loader (TOML) with built-in defaults
 ├── switchpanel/
 │   └── switchpanel.go       # Switch panel HID access via go-hid
 ├── radiopanel/

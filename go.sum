@@ -1,3 +1,5 @@
+github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
+github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/atburke/krpc-go v0.1.0 h1:1o6eurw6p/+PxM8mS73M1wznC0BXADn5cEGyyvJD/GE=
 github.com/atburke/krpc-go v0.1.0/go.mod h1:KoUjqh5ANKYts8vhuBl4w2M/reHfZNSU552lVz6PfZA=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=

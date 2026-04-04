@@ -1,0 +1,65 @@
+# KSP Switch + Radio Panel configuration
+# Place this file next to the ksp-switchpanel binary (or in the directory where you run it).
+# If the file is absent, built-in defaults matching this file are used automatically.
+
+[switches]
+# Maps each physical switch to a kRPC action.
+#
+# Available actions:
+#   rcs             – toggle RCS thrusters
+#   sas             – toggle SAS autopilot
+#   brakes          – toggle brakes
+#   gear_down       – deploy landing gear   (fires only on switch activation)
+#   gear_up         – retract landing gear  (fires only on switch activation)
+#   next_stage      – activate next stage   (fires only on switch activation)
+#   action_group:N  – toggle action group N (1–10)
+#   none            – no action
+
+BAT       = "rcs"
+ALT       = "sas"
+AVIONICS  = "action_group:1"
+FUEL      = "action_group:2"
+DEICE     = "action_group:3"
+PITOT     = "action_group:4"
+COWL      = "action_group:5"
+PANEL     = "action_group:6"
+BEACON    = "action_group:7"
+NAV       = "action_group:8"
+STROBE    = "action_group:9"
+TAXI      = "action_group:10"
+LANDING   = "brakes"
+GEAR_DOWN = "gear_down"
+GEAR_UP   = "gear_up"
+ROT_START = "next_stage"
+
+[radio]
+# Maps each rotary selector position to a pair of displays: [left, right]
+# Format: "field:decimals"  (decimals defaults to 0 if omitted)
+#
+# Available fields:
+#   altitude_km    – mean altitude (km)
+#   vspeed         – vertical speed (m/s)
+#   apoapsis_km    – apoapsis altitude (km)
+#   periapsis_km   – periapsis altitude (km)
+#   speed_kts      – navball speed (knots)
+#   speed_ms       – navball speed (m/s)
+#   orbital_speed  – orbital speed (m/s)
+#   heading        – compass heading (°)
+#   pitch          – pitch angle (°)
+#   roll           – roll angle (°)
+#   latitude       – latitude (°)
+#   longitude      – longitude (°)
+#   gforce         – g-force
+#   dynpressure    – dynamic pressure (Pa)
+#   time_to_apo    – time to apoapsis (s)
+#   time_to_peri   – time to periapsis (s)
+#
+# The same mode names apply to both radio rows (top and bottom selectors).
+
+COM1 = ["altitude_km:1",  "vspeed:0"]
+COM2 = ["apoapsis_km:0",  "periapsis_km:0"]
+NAV1 = ["speed_kts:0",    "heading:0"]
+NAV2 = ["pitch:1",        "roll:1"]
+ADF  = ["latitude:2",     "longitude:2"]
+DME  = ["gforce:2",       "dynpressure:0"]
+XPDR = ["time_to_apo:0",  "time_to_peri:0"]
