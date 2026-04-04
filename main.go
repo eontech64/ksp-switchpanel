@@ -158,21 +158,6 @@ func main() {
 		log.Fatal("No panels found. Connect at least one panel and try again.")
 	}
 
-	log.Println("Connecting to kRPC server...")
-	ctx, cancelCtx := context.WithCancel(context.Background())
-	defer cancelCtx()
-	client := krpcgo.NewKRPCClient(krpcgo.KRPCClientConfig{
-		ClientName: "KSP-Panels",
-		RPCOnly:    true,
-	})
-	if err := client.Connect(ctx); err != nil {
-		log.Fatalf("kRPC: %v", err)
-	}
-	defer client.Close()
-	log.Println("kRPC connected.")
-
-	sc := spacecenter.New(client)
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -192,12 +177,36 @@ func main() {
 	rot1Mode := "COM1"
 	rot2Mode := "COM1"
 
+	kRPCCfg := krpcgo.KRPCClientConfig{
+		ClientName: "KSP-Panels",
+		RPCOnly:    true,
+	}
+
+	// Outer loop: reconnects kRPC + vessel on each new mission.
 	for {
+		// Each iteration creates a fresh kRPC client so a dropped TCP connection
+		// is fully recovered when KSP starts a new mission.
+		ctx, cancelCtx := context.WithCancel(context.Background())
+
+		log.Println("Connecting to kRPC server...")
+		client := krpcgo.NewKRPCClient(kRPCCfg)
+		if err := client.Connect(ctx); err != nil {
+			log.Printf("kRPC connect failed: %v — retrying in 5s...", err)
+			cancelCtx()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		log.Println("kRPC connected.")
+
+		sc := spacecenter.New(client)
 		vessel, control := waitForVessel(sc, swPanel)
 
 		log.Println("Ready.")
 		vesselLost := runSession(ctx, vessel, control, swPanel, radioPanel, cfg,
 			swCh, radioCh, ticker.C, sigCh, &rot1Mode, &rot2Mode)
+
+		client.Close()
+		cancelCtx()
 
 		if !vesselLost {
 			// Clean shutdown via signal.
@@ -205,10 +214,10 @@ func main() {
 			if swPanel != nil {
 				swPanel.SetLEDs(0)
 			}
-			cancelCtx()
 			return
 		}
-		log.Println("Vessel lost. Waiting for new mission...")
+		log.Println("Session ended. Reconnecting...")
+		time.Sleep(2 * time.Second)
 	}
 }
 
