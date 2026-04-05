@@ -56,7 +56,11 @@ func Default() *Config {
 			"LANDING":  "brakes",
 			"GEAR_DOWN": "gear_down",
 			"GEAR_UP":   "gear_up",
-			"ROT_START": "next_stage",
+			"ROT_OFF":   "sas_mode:stability_assist",
+			"ROT_R":     "sas_mode:prograde",
+			"ROT_L":     "sas_mode:retrograde",
+			"ROT_BOTH":  "sas_mode:target",
+			"ROT_START": "sas_mode:anti_target",
 		},
 		Radio: map[string][]string{
 			"COM1": {"altitude_km:1", "vspeed:0"},

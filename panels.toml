@@ -6,14 +6,17 @@
 # Maps each physical switch to a kRPC action.
 #
 # Available actions:
-#   rcs             – toggle RCS thrusters
-#   sas             – toggle SAS autopilot
-#   brakes          – toggle brakes
-#   gear_down       – deploy landing gear   (fires only on switch activation)
-#   gear_up         – retract landing gear  (fires only on switch activation)
-#   next_stage      – activate next stage   (fires only on switch activation)
-#   action_group:N  – toggle action group N (1–10)
-#   none            – no action
+#   rcs                    – toggle RCS thrusters
+#   sas                    – toggle SAS autopilot (on/off)
+#   brakes                 – toggle brakes
+#   gear_down              – deploy landing gear   (fires only on switch activation)
+#   gear_up                – retract landing gear  (fires only on switch activation)
+#   next_stage             – activate next stage   (fires only on switch activation)
+#   action_group:N         – toggle action group N (1–10)
+#   sas_mode:X             – set SAS autopilot mode (fires only on switch activation)
+#       X = stability_assist | prograde | retrograde | target | anti_target
+#       target / anti_target require a target to be selected in KSP
+#   none                   – no action
 
 BAT       = "rcs"
 ALT       = "sas"
@@ -30,7 +33,11 @@ TAXI      = "action_group:10"
 LANDING   = "brakes"
 GEAR_DOWN = "gear_down"
 GEAR_UP   = "gear_up"
-ROT_START = "next_stage"
+ROT_OFF   = "sas_mode:stability_assist"
+ROT_R     = "sas_mode:prograde"
+ROT_L     = "sas_mode:retrograde"
+ROT_BOTH  = "sas_mode:target"
+ROT_START = "sas_mode:anti_target"
 
 [radio]
 # Maps each rotary selector position to a pair of displays: [left, right]

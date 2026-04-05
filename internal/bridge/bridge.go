@@ -1,15 +1,14 @@
-package main
+// Package bridge contains the kRPC ↔ panel bridge logic, shared between
+// the CLI and GUI binaries.
+package bridge
 
 import (
 	"context"
 	"fmt"
 	"log"
 	"math"
-	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	krpcgo "github.com/atburke/krpc-go"
@@ -46,7 +45,6 @@ var switchConfigName = map[switchpanel.SwitchID]string{
 }
 
 // rotaryModeName maps each radio rotary SwitchID to its mode name used in [radio] config.
-// Both rows share the same mode names (COM1, NAV1, etc.).
 var rotaryModeName = map[radiopanel.SwitchID]string{
 	radiopanel.Rot1COM1: "COM1", radiopanel.Rot2COM1: "COM1",
 	radiopanel.Rot1COM2: "COM2", radiopanel.Rot2COM2: "COM2",
@@ -57,7 +55,6 @@ var rotaryModeName = map[radiopanel.SwitchID]string{
 	radiopanel.Rot1XPDR: "XPDR", radiopanel.Rot2XPDR: "XPDR",
 }
 
-// rot1Switch is true for SwitchIDs that belong to the top radio row.
 var rot1Switch = map[radiopanel.SwitchID]bool{
 	radiopanel.Rot1COM1: true, radiopanel.Rot1COM2: true,
 	radiopanel.Rot1NAV1: true, radiopanel.Rot1NAV2: true,
@@ -65,10 +62,8 @@ var rot1Switch = map[radiopanel.SwitchID]bool{
 	radiopanel.Rot1XPDR: true,
 }
 
-// telemetryFn is a function that reads one telemetry value from the current flight state.
 type telemetryFn func(f *spacecenter.Flight, o *spacecenter.Orbit, navSpeed float64) (float64, error)
 
-// telemetryFns is the registry of field names available in the [radio] config.
 var telemetryFns = map[string]telemetryFn{
 	"altitude_km": func(f *spacecenter.Flight, _ *spacecenter.Orbit, _ float64) (float64, error) {
 		v, err := f.MeanAltitude()
@@ -130,67 +125,55 @@ var telemetryFns = map[string]telemetryFn{
 	},
 }
 
-func main() {
-	log.Printf("KSP panels bridge v%s starting...", version)
+// RunBridge runs the full kRPC ↔ panel bridge until quitCh is closed.
+// It sends status updates on statusCh whenever the connection state changes.
+// statusCh is closed when RunBridge returns.
+func RunBridge(
+	statusCh chan<- BridgeStatus,
+	quitCh <-chan struct{},
+	cfg *config.Config,
+	swPanel *switchpanel.Panel,
+	radioPanel *radiopanel.Panel,
+) {
+	defer close(statusCh)
 
-	cfg, err := config.FindAndLoad()
-	if err != nil {
-		log.Fatalf("Config: %v", err)
-	}
-	log.Println("Configuration loaded.")
-
-	log.Println("Connecting to Switch Panel...")
-	swPanel, err := switchpanel.Open()
-	if err != nil {
-		log.Printf("Switch panel not found, continuing without it: %v", err)
-		swPanel = nil
-	} else {
-		log.Println("Switch panel connected.")
-		defer swPanel.Close()
-	}
-
-	log.Println("Connecting to Radio Panel...")
-	radioPanel, err := radiopanel.Open()
-	if err != nil {
-		log.Printf("Radio panel not found, continuing without it: %v", err)
-		radioPanel = nil
-	} else {
-		log.Println("Radio panel connected.")
-		defer radioPanel.Close()
+	send := func(s BridgeStatus) {
+		select {
+		case statusCh <- s:
+		default:
+		}
 	}
 
-	if swPanel == nil && radioPanel == nil {
-		log.Fatal("No panels found. Connect at least one panel and try again.")
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	hasSW := swPanel != nil
+	hasRD := radioPanel != nil
 
 	var swCh <-chan switchpanel.SwitchEvent
-	if swPanel != nil {
+	if hasSW {
 		swCh = swPanel.SwitchCh()
 	}
 	var radioCh <-chan radiopanel.SwitchEvent
-	if radioPanel != nil {
+	if hasRD {
 		radioCh = radioPanel.SwitchCh()
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	// rot modes persist across missions — they reflect the physical rotary position.
 	rot1Mode := "COM1"
 	rot2Mode := "COM1"
+
+	// switchPos tracks the physical position of each switch across sessions.
+	// When reconnecting, these are re-applied to the new vessel.
+	switchPos := make(map[switchpanel.SwitchID]bool)
 
 	kRPCCfg := krpcgo.KRPCClientConfig{
 		ClientName: "KSP-Panels",
 		RPCOnly:    true,
 	}
 
-	// Outer loop: reconnects kRPC + vessel on each new mission.
 	for {
-		// Each iteration creates a fresh kRPC client so a dropped TCP connection
-		// is fully recovered when KSP starts a new mission.
+		send(BridgeStatus{SwitchPanel: hasSW, RadioPanel: hasRD, KRPC: "connecting"})
+
 		ctx, cancelCtx := context.WithCancel(context.Background())
 
 		log.Println("Connecting to kRPC server...")
@@ -199,86 +182,98 @@ func main() {
 			log.Printf("kRPC connect failed: %v — retrying in 1s...", err)
 			cancelCtx()
 			select {
-			case <-sigCh:
-				log.Println("Shutting down...")
-				if swPanel != nil {
-					swPanel.SetLEDs(0)
-				}
+			case <-quitCh:
+				cleanup(swPanel, radioPanel)
 				return
 			case <-time.After(1 * time.Second):
 			}
 			continue
 		}
 		log.Println("kRPC connected.")
+		send(BridgeStatus{SwitchPanel: hasSW, RadioPanel: hasRD, KRPC: "connected"})
 
 		sc := spacecenter.New(client)
-		vessel, control, ok := waitForVessel(sc, swPanel, sigCh)
+		vessel, control, ok := waitForVessel(sc, swPanel, quitCh)
 		if !ok {
 			client.Close()
 			cancelCtx()
-			log.Println("Shutting down...")
-			if swPanel != nil {
-				swPanel.SetLEDs(0)
-			}
+			cleanup(swPanel, radioPanel)
 			return
 		}
+
+		// Re-apply remembered switch positions to the new vessel.
+		reapplySwitches(switchPos, cfg.Switches, control)
 
 		mj := mechjeb.New(client)
 		ap, err := mj.AirplaneAutopilot()
 		if err != nil {
-			log.Printf("MechJeb AirplaneAutopilot not available: %v", err)
 			ap = nil
 		} else {
 			log.Println("MechJeb AirplaneAutopilot ready.")
 		}
 
+		name, _ := vessel.Name()
+		base := BridgeStatus{SwitchPanel: hasSW, RadioPanel: hasRD, KRPC: "connected", VesselName: name, MechJeb: ap != nil}
+		send(base)
+
 		log.Println("Ready.")
 		vesselLost := runSession(ctx, vessel, control, ap, swPanel, radioPanel, cfg,
-			swCh, radioCh, ticker.C, sigCh, &rot1Mode, &rot2Mode)
+			swCh, radioCh, ticker.C, quitCh, &rot1Mode, &rot2Mode,
+			statusCh, base, switchPos)
 
 		client.Close()
 		cancelCtx()
 
 		if !vesselLost {
-			log.Println("Shutting down...")
-			if swPanel != nil {
-				swPanel.SetLEDs(0)
-			}
+			cleanup(swPanel, radioPanel)
 			return
 		}
+
+		// Vessel lost — blank panels and retry.
+		if swPanel != nil {
+			swPanel.SetLEDs(0)
+		}
+		if radioPanel != nil {
+			radioPanel.DisplayOff()
+		}
 		log.Println("Session ended. Reconnecting...")
+		send(BridgeStatus{SwitchPanel: hasSW, RadioPanel: hasRD, KRPC: "connecting"})
 		select {
-		case <-sigCh:
-			log.Println("Shutting down...")
-			if swPanel != nil {
-				swPanel.SetLEDs(0)
-			}
+		case <-quitCh:
+			cleanup(swPanel, radioPanel)
 			return
-		case <-time.After(2 * time.Second):
+		case <-time.After(1 * time.Second):
 		}
 	}
 }
 
-// waitForVessel blocks until an active vessel is available in KSP.
-// Returns (vessel, control, true) on success, or (nil, nil, false) if a shutdown signal is received.
-func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, sigCh <-chan os.Signal) (*spacecenter.Vessel, *spacecenter.Control, bool) {
+func cleanup(swPanel *switchpanel.Panel, radioPanel *radiopanel.Panel) {
+	if swPanel != nil {
+		swPanel.SetLEDs(0)
+	}
+	if radioPanel != nil {
+		radioPanel.DisplayOff()
+	}
+}
+
+func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, quitCh <-chan struct{}) (*spacecenter.Vessel, *spacecenter.Control, bool) {
 	log.Println("Waiting for active vessel...")
 	for {
 		vessel, err := sc.ActiveVessel()
 		if err != nil {
 			select {
-			case <-sigCh:
+			case <-quitCh:
 				return nil, nil, false
-			case <-time.After(2 * time.Second):
+			case <-time.After(1 * time.Second):
 			}
 			continue
 		}
 		control, err := vessel.Control()
 		if err != nil {
 			select {
-			case <-sigCh:
+			case <-quitCh:
 				return nil, nil, false
-			case <-time.After(2 * time.Second):
+			case <-time.After(1 * time.Second):
 			}
 			continue
 		}
@@ -291,8 +286,6 @@ func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, sigC
 	}
 }
 
-// runSession runs the main event loop for a single active vessel.
-// Returns true if the vessel was lost (new mission), false on clean shutdown.
 func runSession(
 	ctx context.Context,
 	vessel *spacecenter.Vessel,
@@ -304,28 +297,38 @@ func runSession(
 	swCh <-chan switchpanel.SwitchEvent,
 	radioCh <-chan radiopanel.SwitchEvent,
 	tickC <-chan time.Time,
-	sigCh <-chan os.Signal,
+	quitCh <-chan struct{},
 	rot1Mode, rot2Mode *string,
+	statusCh chan<- BridgeStatus,
+	base BridgeStatus,
+	switchPos map[switchpanel.SwitchID]bool,
 ) bool {
 	errCount := 0
 	const maxErrors = 3
+
+	sendStatus := func(s BridgeStatus) {
+		select {
+		case statusCh <- s:
+		default:
+		}
+	}
+
+	lastAP := BridgeStatus{}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return false
-		case <-sigCh:
+		case <-quitCh:
 			return false
-
 		case ev := <-swCh:
+			switchPos[ev.Switch] = ev.On
 			handleSwitch(ev, cfg.Switches, control)
-
 		case ev := <-radioCh:
 			handleRadioSwitch(ev, rot1Mode, rot2Mode)
 			if ap != nil {
 				handleAutopilot(ev, ap)
 			}
-
 		case <-tickC:
 			tickOK := true
 			if swPanel != nil && !syncLEDs(control, swPanel) {
@@ -337,16 +340,23 @@ func runSession(
 			if !tickOK {
 				errCount++
 				if errCount >= maxErrors {
-					return true // vessel lost
+					return true
 				}
 			} else {
 				errCount = 0
+			}
+			// Send AP status when it changes.
+			if ap != nil {
+				cur := readAPStatus(ap, base)
+				if cur != lastAP {
+					sendStatus(cur)
+					lastAP = cur
+				}
 			}
 		}
 	}
 }
 
-// handleSwitch dispatches a switch event to the corresponding kRPC action from config.
 func handleSwitch(ev switchpanel.SwitchEvent, switchCfg map[string]string, ctrl *spacecenter.Control) {
 	name, ok := switchConfigName[ev.Switch]
 	if !ok {
@@ -356,31 +366,23 @@ func handleSwitch(ev switchpanel.SwitchEvent, switchCfg map[string]string, ctrl 
 	if !ok || action == "none" || action == "" {
 		return
 	}
-
 	on := ev.On
 	switch {
 	case action == "rcs":
-		log.Printf("%s -> RCS: %v", name, on)
 		ctrl.SetRCS(on)
 	case action == "sas":
-		log.Printf("%s -> SAS: %v", name, on)
 		ctrl.SetSAS(on)
 	case action == "brakes":
-		log.Printf("%s -> Brakes: %v", name, on)
 		ctrl.SetBrakes(on)
 	case action == "gear_down" && on:
-		log.Printf("%s -> Gear DOWN", name)
 		ctrl.SetGear(true)
 	case action == "gear_up" && on:
-		log.Printf("%s -> Gear UP", name)
 		ctrl.SetGear(false)
 	case action == "next_stage" && on:
-		log.Printf("%s -> Next stage", name)
 		ctrl.ActivateNextStage()
 	case strings.HasPrefix(action, "action_group:"):
 		n, err := strconv.Atoi(strings.TrimPrefix(action, "action_group:"))
 		if err != nil {
-			log.Printf("Invalid action_group in config for %s: %q", name, action)
 			return
 		}
 		ctrl.SetActionGroup(uint32(n), on)
@@ -393,13 +395,11 @@ func handleSwitch(ev switchpanel.SwitchEvent, switchCfg map[string]string, ctrl 
 			"anti_target":      spacecenter.SASMode_AntiTarget,
 		}
 		if m, ok := sasModeLookup[strings.TrimPrefix(action, "sas_mode:")]; ok {
-			log.Printf("%s -> SAS mode: %s", name, strings.TrimPrefix(action, "sas_mode:"))
 			ctrl.SetSASMode(m)
 		}
 	}
 }
 
-// handleRadioSwitch tracks which telemetry mode each rotary row is set to.
 func handleRadioSwitch(ev radiopanel.SwitchEvent, rot1Mode, rot2Mode *string) {
 	if !ev.On {
 		return
@@ -417,8 +417,70 @@ func handleRadioSwitch(ev radiopanel.SwitchEvent, rot1Mode, rot2Mode *string) {
 	}
 }
 
-// updateDisplays writes telemetry to the radio panel based on current rotary modes.
-// Returns false if the vessel reference appears to be invalid.
+func handleAutopilot(ev radiopanel.SwitchEvent, ap *mechjeb.AirplaneAutopilot) {
+	if !ev.On {
+		return
+	}
+	switch ev.Switch {
+	case radiopanel.SwAct1:
+		enabled, err := ap.SpeedHoldEnabled()
+		if err != nil {
+			return
+		}
+		ap.SetSpeedHoldEnabled(!enabled)
+		log.Printf("Autopilot SpeedHold: %v", !enabled)
+	case radiopanel.SwAct2:
+		enabled, err := ap.AltitudeHoldEnabled()
+		if err != nil {
+			return
+		}
+		ap.SetAltitudeHoldEnabled(!enabled)
+		log.Printf("Autopilot AltitudeHold: %v", !enabled)
+	case radiopanel.Enc1InnerCW:
+		adjustSpeed(ap, +1)
+	case radiopanel.Enc1InnerCCW:
+		adjustSpeed(ap, -1)
+	case radiopanel.Enc1OuterCW:
+		adjustSpeed(ap, +10)
+	case radiopanel.Enc1OuterCCW:
+		adjustSpeed(ap, -10)
+	case radiopanel.Enc2InnerCW:
+		adjustAltitude(ap, +10)
+	case radiopanel.Enc2InnerCCW:
+		adjustAltitude(ap, -10)
+	case radiopanel.Enc2OuterCW:
+		adjustAltitude(ap, +100)
+	case radiopanel.Enc2OuterCCW:
+		adjustAltitude(ap, -100)
+	}
+}
+
+func adjustSpeed(ap *mechjeb.AirplaneAutopilot, delta float64) {
+	current, err := ap.SpeedTarget()
+	if err != nil {
+		return
+	}
+	next := current + delta
+	if next < 0 {
+		next = 0
+	}
+	ap.SetSpeedTarget(next)
+	log.Printf("Autopilot SpeedTarget: %.0f kt", next)
+}
+
+func adjustAltitude(ap *mechjeb.AirplaneAutopilot, delta float64) {
+	current, err := ap.AltitudeTarget()
+	if err != nil {
+		return
+	}
+	next := current + delta
+	if next < 0 {
+		next = 0
+	}
+	ap.SetAltitudeTarget(next)
+	log.Printf("Autopilot AltitudeTarget: %.0f m", next)
+}
+
 func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spacecenter.Control,
 	rot1Mode, rot2Mode string, radioCfg map[string][]string) bool {
 
@@ -455,7 +517,6 @@ func updateDisplays(rp *radiopanel.Panel, vessel *spacecenter.Vessel, ctrl *spac
 	return true
 }
 
-// writeDisplayPair writes the left/right telemetry values for a given mode onto two displays.
 func writeDisplayPair(rp *radiopanel.Panel, flight *spacecenter.Flight, orbit *spacecenter.Orbit,
 	navSpeed float64, radioCfg map[string][]string, mode string,
 	left, right radiopanel.DisplayID) {
@@ -466,25 +527,21 @@ func writeDisplayPair(rp *radiopanel.Panel, flight *spacecenter.Flight, orbit *s
 	}
 	leftSpec, err := config.ParseDisplaySpec(specs[0])
 	if err != nil {
-		log.Printf("Radio config [%s] left: %v", mode, err)
 		return
 	}
 	rightSpec, err := config.ParseDisplaySpec(specs[1])
 	if err != nil {
-		log.Printf("Radio config [%s] right: %v", mode, err)
 		return
 	}
 	writeDisplay(rp, left, leftSpec, flight, orbit, navSpeed)
 	writeDisplay(rp, right, rightSpec, flight, orbit, navSpeed)
 }
 
-// writeDisplay reads one telemetry field and writes it to a single display.
 func writeDisplay(rp *radiopanel.Panel, display radiopanel.DisplayID, spec config.DisplaySpec,
 	flight *spacecenter.Flight, orbit *spacecenter.Orbit, navSpeed float64) {
 
 	fn, ok := telemetryFns[spec.Field]
 	if !ok {
-		log.Printf("Unknown telemetry field %q", spec.Field)
 		return
 	}
 	v, err := fn(flight, orbit, navSpeed)
@@ -498,8 +555,6 @@ func writeDisplay(rp *radiopanel.Panel, display radiopanel.DisplayID, spec confi
 	}
 }
 
-// syncLEDs updates the landing gear LEDs to reflect the current gear state.
-// Returns false if the vessel reference appears to be invalid.
 func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel) bool {
 	deployed, err := ctrl.Gear()
 	if err != nil {
@@ -513,84 +568,31 @@ func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel) bool {
 	return true
 }
 
-func radioModeName(id radiopanel.SwitchID) string {
+// reapplySwitches sends the remembered switch positions to a freshly connected vessel.
+func reapplySwitches(pos map[switchpanel.SwitchID]bool, switchCfg map[string]string, ctrl *spacecenter.Control) {
+	if len(pos) == 0 {
+		return
+	}
+	log.Println("Re-applying switch positions to new vessel...")
+	for id, on := range pos {
+		handleSwitch(switchpanel.SwitchEvent{Switch: id, On: on}, switchCfg, ctrl)
+	}
+}
+
+// readAPStatus reads the current MechJeb airplane autopilot state and returns
+// a BridgeStatus with the AP fields filled in (other fields copied from base).
+func readAPStatus(ap *mechjeb.AirplaneAutopilot, base BridgeStatus) BridgeStatus {
+	s := base
+	s.APSpeedHold, _ = ap.SpeedHoldEnabled()
+	s.APAltHold, _ = ap.AltitudeHoldEnabled()
+	s.APSpeedTarget, _ = ap.SpeedTarget()
+	s.APAltTarget, _ = ap.AltitudeTarget()
+	return s
+}
+
+func radioModeNameStr(id radiopanel.SwitchID) string {
 	if name, ok := rotaryModeName[id]; ok {
 		return name
 	}
 	return fmt.Sprintf("mode %d", id)
-}
-
-// handleAutopilot maps radio panel encoder and button events to MechJeb airplane autopilot.
-//
-//	SwAct1        — toggle speed hold
-//	SwAct2        — toggle altitude hold
-//	Enc1Inner     — speed target ±1 kt
-//	Enc1Outer     — speed target ±10 kt
-//	Enc2Inner     — altitude target ±10 m
-//	Enc2Outer     — altitude target ±100 m
-func handleAutopilot(ev radiopanel.SwitchEvent, ap *mechjeb.AirplaneAutopilot) {
-	if !ev.On {
-		return
-	}
-	switch ev.Switch {
-	case radiopanel.SwAct1:
-		enabled, err := ap.SpeedHoldEnabled()
-		if err != nil {
-			return
-		}
-		ap.SetSpeedHoldEnabled(!enabled)
-		log.Printf("Autopilot SpeedHold: %v", !enabled)
-
-	case radiopanel.SwAct2:
-		enabled, err := ap.AltitudeHoldEnabled()
-		if err != nil {
-			return
-		}
-		ap.SetAltitudeHoldEnabled(!enabled)
-		log.Printf("Autopilot AltitudeHold: %v", !enabled)
-
-	case radiopanel.Enc1InnerCW:
-		adjustSpeed(ap, +1)
-	case radiopanel.Enc1InnerCCW:
-		adjustSpeed(ap, -1)
-	case radiopanel.Enc1OuterCW:
-		adjustSpeed(ap, +10)
-	case radiopanel.Enc1OuterCCW:
-		adjustSpeed(ap, -10)
-
-	case radiopanel.Enc2InnerCW:
-		adjustAltitude(ap, +10)
-	case radiopanel.Enc2InnerCCW:
-		adjustAltitude(ap, -10)
-	case radiopanel.Enc2OuterCW:
-		adjustAltitude(ap, +100)
-	case radiopanel.Enc2OuterCCW:
-		adjustAltitude(ap, -100)
-	}
-}
-
-func adjustSpeed(ap *mechjeb.AirplaneAutopilot, delta float64) {
-	current, err := ap.SpeedTarget()
-	if err != nil {
-		return
-	}
-	next := current + delta
-	if next < 0 {
-		next = 0
-	}
-	ap.SetSpeedTarget(next)
-	log.Printf("Autopilot SpeedTarget: %.0f kt", next)
-}
-
-func adjustAltitude(ap *mechjeb.AirplaneAutopilot, delta float64) {
-	current, err := ap.AltitudeTarget()
-	if err != nil {
-		return
-	}
-	next := current + delta
-	if next < 0 {
-		next = 0
-	}
-	ap.SetAltitudeTarget(next)
-	log.Printf("Autopilot AltitudeTarget: %.0f m", next)
 }

@@ -1,6 +1,6 @@
 package main
 
-const version = "0.8.0"
+const version = "1.0.0"
 
 // Changelog:
 // 0.1.0 - Switch panel support via hidapi (IOKit on macOS) + kRPC bridge
@@ -11,3 +11,5 @@ const version = "0.8.0"
 // 0.6.0 - Altitude in km (1 decimal) to handle >99km without overflow
 // 0.7.0 - Switch actions and radio display modes configurable via panels.toml
 // 0.8.0 - Auto-reconnect kRPC and re-acquire vessel between missions
+// 0.9.0 - GUI binary (ksp-switchpanel-ui) with status window; kRPC retry 1s
+// 1.0.0 - Rotary → SAS mode; MechJeb AP integration; switch memory; panels blank on disconnect
