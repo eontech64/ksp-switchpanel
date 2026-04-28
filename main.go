@@ -17,6 +17,7 @@ import (
 
 	"ksp-switchpanel/config"
 	"ksp-switchpanel/mechjeb"
+	"ksp-switchpanel/multipanel"
 	"ksp-switchpanel/radiopanel"
 	"ksp-switchpanel/switchpanel"
 )
@@ -139,56 +140,103 @@ func main() {
 	}
 	log.Println("Configuration loaded.")
 
-	log.Println("Connecting to Switch Panel...")
-	swPanel, err := switchpanel.Open()
-	if err != nil {
-		log.Printf("Switch panel not found, continuing without it: %v", err)
-		swPanel = nil
-	} else {
-		log.Println("Switch panel connected.")
-		defer swPanel.Close()
-	}
-
-	log.Println("Connecting to Radio Panel...")
-	radioPanel, err := radiopanel.Open()
-	if err != nil {
-		log.Printf("Radio panel not found, continuing without it: %v", err)
-		radioPanel = nil
-	} else {
-		log.Println("Radio panel connected.")
-		defer radioPanel.Close()
-	}
-
-	if swPanel == nil && radioPanel == nil {
-		log.Fatal("No panels found. Connect at least one panel and try again.")
-	}
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	var swCh <-chan switchpanel.SwitchEvent
-	if swPanel != nil {
-		swCh = swPanel.SwitchCh()
-	}
-	var radioCh <-chan radiopanel.SwitchEvent
-	if radioPanel != nil {
-		radioCh = radioPanel.SwitchCh()
-	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	// rot modes persist across missions — they reflect the physical rotary position.
+	// Rotary modes persist across missions — they reflect the physical rotary position.
 	rot1Mode := "COM1"
 	rot2Mode := "COM1"
+	// Multi panel rotary: starts at ALT; overridden by initial-state event on startup.
+	multiRotMode := "ALT"
 
 	kRPCCfg := krpcgo.KRPCClientConfig{
 		ClientName: "KSP-Panels",
 		RPCOnly:    true,
 	}
 
+	var swPanel *switchpanel.Panel
+	var radioPanel *radiopanel.Panel
+	var multiPanel *multipanel.Panel
+
 	// Outer loop: reconnects kRPC + vessel on each new mission.
 	for {
+		// Release and nil any panels that have been disconnected.
+		if swPanel != nil {
+			select {
+			case <-swPanel.Done():
+				log.Println("Switch panel disconnected.")
+				swPanel.Close()
+				swPanel = nil
+			default:
+			}
+		}
+		if radioPanel != nil {
+			select {
+			case <-radioPanel.Done():
+				log.Println("Radio panel disconnected.")
+				radioPanel.Close()
+				radioPanel = nil
+			default:
+			}
+		}
+		if multiPanel != nil {
+			select {
+			case <-multiPanel.Done():
+				log.Println("Multi panel disconnected.")
+				multiPanel.Close()
+				multiPanel = nil
+			default:
+			}
+		}
+
+		// Try to open any panels not currently connected.
+		if swPanel == nil {
+			if p, err := switchpanel.Open(); err == nil {
+				log.Println("Switch panel connected.")
+				swPanel = p
+			}
+		}
+		if radioPanel == nil {
+			if p, err := radiopanel.Open(); err == nil {
+				log.Println("Radio panel connected.")
+				radioPanel = p
+			}
+		}
+		if multiPanel == nil {
+			if p, err := multipanel.Open(); err == nil {
+				log.Println("Multi panel connected.")
+				multiPanel = p
+			}
+		}
+
+		if swPanel == nil && radioPanel == nil && multiPanel == nil {
+			log.Println("No panels found. Waiting for a panel to be connected...")
+			select {
+			case <-sigCh:
+				log.Println("Shutting down.")
+				return
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+
+		// Derive channels fresh each iteration so reconnected panels get their new channels.
+		var swCh <-chan switchpanel.SwitchEvent
+		if swPanel != nil {
+			swCh = swPanel.SwitchCh()
+		}
+		var radioCh <-chan radiopanel.SwitchEvent
+		if radioPanel != nil {
+			radioCh = radioPanel.SwitchCh()
+		}
+		var multiCh <-chan multipanel.SwitchEvent
+		if multiPanel != nil {
+			multiCh = multiPanel.SwitchCh()
+		}
+
 		// Each iteration creates a fresh kRPC client so a dropped TCP connection
 		// is fully recovered when KSP starts a new mission.
 		ctx, cancelCtx := context.WithCancel(context.Background())
@@ -200,10 +248,8 @@ func main() {
 			cancelCtx()
 			select {
 			case <-sigCh:
-				log.Println("Shutting down...")
-				if swPanel != nil {
-					swPanel.SetLEDs(0)
-				}
+				log.Println("Shutting down.")
+				shutdownPanels(swPanel, radioPanel, multiPanel)
 				return
 			case <-time.After(1 * time.Second):
 			}
@@ -216,10 +262,8 @@ func main() {
 		if !ok {
 			client.Close()
 			cancelCtx()
-			log.Println("Shutting down...")
-			if swPanel != nil {
-				swPanel.SetLEDs(0)
-			}
+			log.Println("Shutting down.")
+			shutdownPanels(swPanel, radioPanel, multiPanel)
 			return
 		}
 
@@ -233,29 +277,54 @@ func main() {
 		}
 
 		log.Println("Ready.")
-		vesselLost := runSession(ctx, vessel, control, ap, swPanel, radioPanel, cfg,
-			swCh, radioCh, ticker.C, sigCh, &rot1Mode, &rot2Mode)
+		vesselLost := runSession(ctx, vessel, control, ap, swPanel, radioPanel, multiPanel, cfg,
+			swCh, radioCh, multiCh, ticker.C, sigCh, &rot1Mode, &rot2Mode, &multiRotMode)
 
 		client.Close()
 		cancelCtx()
 
 		if !vesselLost {
-			log.Println("Shutting down...")
-			if swPanel != nil {
-				swPanel.SetLEDs(0)
-			}
+			log.Println("Shutting down.")
+			shutdownPanels(swPanel, radioPanel, multiPanel)
 			return
+		}
+
+		// Session ended (vessel lost or panel disconnected) — blank what's still connected.
+		if swPanel != nil {
+			swPanel.SetLEDs(0)
+		}
+		if radioPanel != nil {
+			radioPanel.DisplayOff()
+		}
+		if multiPanel != nil {
+			multiPanel.SetLEDs(0)
+			multiPanel.DisplayOff()
 		}
 		log.Println("Session ended. Reconnecting...")
 		select {
 		case <-sigCh:
-			log.Println("Shutting down...")
-			if swPanel != nil {
-				swPanel.SetLEDs(0)
-			}
+			log.Println("Shutting down.")
+			shutdownPanels(swPanel, radioPanel, multiPanel)
 			return
 		case <-time.After(2 * time.Second):
 		}
+	}
+}
+
+// shutdownPanels blanks outputs and closes all open panels.
+func shutdownPanels(swPanel *switchpanel.Panel, radioPanel *radiopanel.Panel, multiPanel *multipanel.Panel) {
+	if swPanel != nil {
+		swPanel.SetLEDs(0)
+		swPanel.Close()
+	}
+	if radioPanel != nil {
+		radioPanel.DisplayOff()
+		radioPanel.Close()
+	}
+	if multiPanel != nil {
+		multiPanel.SetLEDs(0)
+		multiPanel.DisplayOff()
+		multiPanel.Close()
 	}
 }
 
@@ -292,7 +361,7 @@ func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, sigC
 }
 
 // runSession runs the main event loop for a single active vessel.
-// Returns true if the vessel was lost (new mission), false on clean shutdown.
+// Returns true if the vessel was lost or a panel disconnected (retry), false on clean shutdown.
 func runSession(
 	ctx context.Context,
 	vessel *spacecenter.Vessel,
@@ -300,15 +369,31 @@ func runSession(
 	ap *mechjeb.AirplaneAutopilot,
 	swPanel *switchpanel.Panel,
 	radioPanel *radiopanel.Panel,
+	multiPanel *multipanel.Panel,
 	cfg *config.Config,
 	swCh <-chan switchpanel.SwitchEvent,
 	radioCh <-chan radiopanel.SwitchEvent,
+	multiCh <-chan multipanel.SwitchEvent,
 	tickC <-chan time.Time,
 	sigCh <-chan os.Signal,
 	rot1Mode, rot2Mode *string,
+	multiRotMode *string,
 ) bool {
 	errCount := 0
 	const maxErrors = 3
+	gearState := &gearLEDState{}
+
+	// Done channels — nil channel never fires, so absent panels are handled safely.
+	var swDone, radioDone, multiDone <-chan struct{}
+	if swPanel != nil {
+		swDone = swPanel.Done()
+	}
+	if radioPanel != nil {
+		radioDone = radioPanel.Done()
+	}
+	if multiPanel != nil {
+		multiDone = multiPanel.Done()
+	}
 
 	for {
 		select {
@@ -316,6 +401,15 @@ func runSession(
 			return false
 		case <-sigCh:
 			return false
+		case <-swDone:
+			log.Println("Switch panel disconnected during session.")
+			return true
+		case <-radioDone:
+			log.Println("Radio panel disconnected during session.")
+			return true
+		case <-multiDone:
+			log.Println("Multi panel disconnected during session.")
+			return true
 
 		case ev := <-swCh:
 			handleSwitch(ev, cfg.Switches, control)
@@ -326,13 +420,23 @@ func runSession(
 				handleAutopilot(ev, ap)
 			}
 
+		case ev := <-multiCh:
+			if ap != nil {
+				handleMultiSwitch(ev, multiRotMode, ap, control)
+			}
+
 		case <-tickC:
 			tickOK := true
-			if swPanel != nil && !syncLEDs(control, swPanel) {
+			if swPanel != nil && !syncLEDs(control, swPanel, gearState) {
 				tickOK = false
 			}
 			if radioPanel != nil && !updateDisplays(radioPanel, vessel, control, *rot1Mode, *rot2Mode, cfg.Radio) {
 				tickOK = false
+			}
+			if multiPanel != nil && ap != nil {
+				if !syncMultiLEDs(multiPanel, ap) || !updateMultiDisplay(multiPanel, vessel, ap, *multiRotMode) {
+					tickOK = false
+				}
 			}
 			if !tickOK {
 				errCount++
@@ -498,17 +602,41 @@ func writeDisplay(rp *radiopanel.Panel, display radiopanel.DisplayID, spec confi
 	}
 }
 
-// syncLEDs updates the landing gear LEDs to reflect the current gear state.
+// gearLEDState tracks gear position across ticks to detect transitions.
+type gearLEDState struct {
+	initialized     bool
+	lastDeployed    bool
+	transitionUntil time.Time
+}
+
+// syncLEDs updates the landing gear LEDs:
+//   - Gear DOWN → all green
+//   - Gear UP   → all off
+//   - Transition (5 s after state change) → all red
+//
 // Returns false if the vessel reference appears to be invalid.
-func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel) bool {
+func syncLEDs(ctrl *spacecenter.Control, panel *switchpanel.Panel, state *gearLEDState) bool {
 	deployed, err := ctrl.Gear()
 	if err != nil {
 		return false
 	}
-	if deployed {
-		panel.SetLEDs(switchpanel.LEDAllGreen)
-	} else {
+
+	if !state.initialized {
+		// First call: record state without triggering transition.
+		state.lastDeployed = deployed
+		state.initialized = true
+	} else if deployed != state.lastDeployed {
+		state.transitionUntil = time.Now().Add(5 * time.Second)
+		state.lastDeployed = deployed
+	}
+
+	switch {
+	case time.Now().Before(state.transitionUntil):
 		panel.SetLEDs(switchpanel.LEDAllRed)
+	case deployed:
+		panel.SetLEDs(switchpanel.LEDAllGreen)
+	default:
+		panel.SetLEDs(0)
 	}
 	return true
 }
@@ -593,4 +721,255 @@ func adjustAltitude(ap *mechjeb.AirplaneAutopilot, delta float64) {
 	}
 	ap.SetAltitudeTarget(next)
 	log.Printf("Autopilot AltitudeTarget: %.0f m", next)
+}
+
+// handleMultiSwitch dispatches a multi panel event to MechJeb airplane autopilot.
+//
+// Rotary selector (ALT/VS/IAS/HDG/CRS) — sets the active mode tracked by rotMode.
+// Buttons AP/HDG/ALT/VS/IAS — toggle the corresponding MechJeb hold.
+// Encoder CW/CCW — nudge the target value for the current mode:
+//
+//	ALT: ±100 m   VS: ±1 m/s   IAS: ±1 m/s   HDG/CRS: ±1°
+func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.AirplaneAutopilot, ctrl *spacecenter.Control) {
+	if !ev.On {
+		return
+	}
+	switch ev.Switch {
+	case multipanel.RotALT:
+		*rotMode = "ALT"
+		log.Printf("Multi panel rotary -> ALT")
+	case multipanel.RotVS:
+		*rotMode = "VS"
+		log.Printf("Multi panel rotary -> VS")
+	case multipanel.RotIAS:
+		*rotMode = "IAS"
+		log.Printf("Multi panel rotary -> IAS")
+	case multipanel.RotHDG:
+		*rotMode = "HDG"
+		log.Printf("Multi panel rotary -> HDG")
+	case multipanel.RotCRS:
+		*rotMode = "CRS"
+		log.Printf("Multi panel rotary -> CRS")
+
+	case multipanel.BtnAP:
+		enabled, err := ap.Enabled()
+		if err != nil {
+			return
+		}
+		ap.SetEnabled(!enabled)
+		log.Printf("Multi AP master: %v", !enabled)
+
+	case multipanel.BtnHDG:
+		enabled, err := ap.HeadingHoldEnabled()
+		if err != nil {
+			return
+		}
+		ap.SetHeadingHoldEnabled(!enabled)
+		log.Printf("Multi HeadingHold: %v", !enabled)
+
+	case multipanel.BtnALT:
+		enabled, err := ap.AltitudeHoldEnabled()
+		if err != nil {
+			return
+		}
+		ap.SetAltitudeHoldEnabled(!enabled)
+		log.Printf("Multi AltitudeHold: %v", !enabled)
+
+	case multipanel.BtnVS:
+		enabled, err := ap.VertSpeedHoldEnabled()
+		if err != nil {
+			return
+		}
+		ap.SetVertSpeedHoldEnabled(!enabled)
+		log.Printf("Multi VertSpeedHold: %v", !enabled)
+
+	case multipanel.BtnIAS:
+		enabled, err := ap.SpeedHoldEnabled()
+		if err != nil {
+			return
+		}
+		ap.SetSpeedHoldEnabled(!enabled)
+		log.Printf("Multi SpeedHold: %v", !enabled)
+
+	case multipanel.EncCW:
+		adjustMultiTarget(ap, *rotMode, +1)
+	case multipanel.EncCCW:
+		adjustMultiTarget(ap, *rotMode, -1)
+	}
+}
+
+// adjustMultiTarget nudges the MechJeb target value for the given mode by delta steps.
+// Step sizes: ALT ±100 m, VS ±1 m/s, IAS ±1 m/s, HDG/CRS ±1°.
+func adjustMultiTarget(ap *mechjeb.AirplaneAutopilot, rotMode string, direction float64) {
+	switch rotMode {
+	case "ALT":
+		current, err := ap.AltitudeTarget()
+		if err != nil {
+			return
+		}
+		next := current + direction*100
+		if next < 0 {
+			next = 0
+		}
+		ap.SetAltitudeTarget(next)
+		log.Printf("Multi AltitudeTarget: %.0f m", next)
+
+	case "VS":
+		current, err := ap.VertSpeedTarget()
+		if err != nil {
+			return
+		}
+		next := current + direction*1
+		ap.SetVertSpeedTarget(next)
+		log.Printf("Multi VertSpeedTarget: %.1f m/s", next)
+
+	case "IAS":
+		current, err := ap.SpeedTarget()
+		if err != nil {
+			return
+		}
+		next := current + direction*1
+		if next < 0 {
+			next = 0
+		}
+		ap.SetSpeedTarget(next)
+		log.Printf("Multi SpeedTarget: %.0f m/s", next)
+
+	case "HDG", "CRS":
+		current, err := ap.HeadingTarget()
+		if err != nil {
+			return
+		}
+		next := current + direction*1
+		for next < 0 {
+			next += 360
+		}
+		for next >= 360 {
+			next -= 360
+		}
+		ap.SetHeadingTarget(next)
+		log.Printf("Multi HeadingTarget: %.0f°", next)
+	}
+}
+
+// syncMultiLEDs lights the button LEDs that match active MechJeb hold modes.
+// Returns false if any kRPC call fails (vessel likely lost).
+func syncMultiLEDs(mp *multipanel.Panel, ap *mechjeb.AirplaneAutopilot) bool {
+	var leds byte
+
+	masterOn, err := ap.Enabled()
+	if err != nil {
+		return false
+	}
+	if masterOn {
+		leds |= multipanel.LEDAP
+	}
+
+	hdg, err := ap.HeadingHoldEnabled()
+	if err != nil {
+		return false
+	}
+	if hdg {
+		leds |= multipanel.LEDHDG
+	}
+
+	alt, err := ap.AltitudeHoldEnabled()
+	if err != nil {
+		return false
+	}
+	if alt {
+		leds |= multipanel.LEDALT
+	}
+
+	vs, err := ap.VertSpeedHoldEnabled()
+	if err != nil {
+		return false
+	}
+	if vs {
+		leds |= multipanel.LEDVS
+	}
+
+	ias, err := ap.SpeedHoldEnabled()
+	if err != nil {
+		return false
+	}
+	if ias {
+		leds |= multipanel.LEDIAS
+	}
+
+	mp.SetLEDs(leds)
+	return true
+}
+
+// updateMultiDisplay writes the target (Row1) and actual (Row2) values for the
+// current rotary mode onto the multi panel segment display.
+// Returns false if any kRPC call fails (vessel likely lost).
+func updateMultiDisplay(mp *multipanel.Panel, vessel *spacecenter.Vessel, ap *mechjeb.AirplaneAutopilot, rotMode string) bool {
+	orbit, err := vessel.Orbit()
+	if err != nil {
+		return false
+	}
+	body, err := orbit.Body()
+	if err != nil {
+		return false
+	}
+	bodyRef, err := body.ReferenceFrame()
+	if err != nil {
+		return false
+	}
+	flight, err := vessel.Flight(bodyRef)
+	if err != nil {
+		return false
+	}
+
+	switch rotMode {
+	case "ALT":
+		target, err := ap.AltitudeTarget()
+		if err != nil {
+			return false
+		}
+		actual, err := flight.MeanAltitude()
+		if err != nil {
+			return false
+		}
+		mp.DisplayInt(multipanel.Row1, int(target))
+		mp.DisplayInt(multipanel.Row2, int(actual))
+
+	case "VS":
+		target, err := ap.VertSpeedTarget()
+		if err != nil {
+			return false
+		}
+		actual, err := flight.VerticalSpeed()
+		if err != nil {
+			return false
+		}
+		mp.DisplayInt(multipanel.Row1, int(target))
+		mp.DisplayInt(multipanel.Row2, int(actual))
+
+	case "IAS":
+		target, err := ap.SpeedTarget()
+		if err != nil {
+			return false
+		}
+		actual, err := flight.Speed()
+		if err != nil {
+			return false
+		}
+		mp.DisplayInt(multipanel.Row1, int(target))
+		mp.DisplayInt(multipanel.Row2, int(actual))
+
+	case "HDG", "CRS":
+		target, err := ap.HeadingTarget()
+		if err != nil {
+			return false
+		}
+		actualRaw, err := flight.Heading()
+		if err != nil {
+			return false
+		}
+		mp.DisplayInt(multipanel.Row1, int(target))
+		mp.DisplayInt(multipanel.Row2, int(actualRaw))
+	}
+	return true
 }

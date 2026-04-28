@@ -73,6 +73,8 @@ type Panel struct {
 	dev          *hid.Device
 	switchCh     chan SwitchEvent
 	quit         chan struct{}
+	done         chan struct{} // closed when readLoop exits (device disconnected or Close called)
+	closeOnce    sync.Once
 	mu           sync.Mutex
 	displayState [22]byte
 	initialState [3]byte
@@ -92,6 +94,7 @@ func Open() (*Panel, error) {
 		dev:      dev,
 		switchCh: make(chan SwitchEvent, 32),
 		quit:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	// Initialize all displays to blank
 	for i := range p.displayState {
@@ -113,7 +116,7 @@ func Open() (*Panel, error) {
 
 // Close releases the device.
 func (p *Panel) Close() {
-	close(p.quit)
+	p.closeOnce.Do(func() { close(p.quit) })
 	// Blank displays on exit
 	p.mu.Lock()
 	for i := range p.displayState {
@@ -123,6 +126,12 @@ func (p *Panel) Close() {
 	p.mu.Unlock()
 	p.dev.Close()
 	hid.Exit()
+}
+
+// Done returns a channel that is closed when the panel's read loop exits.
+// This happens either when Close is called or when the device is disconnected.
+func (p *Panel) Done() <-chan struct{} {
+	return p.done
 }
 
 // SwitchCh returns the channel that emits switch/encoder events.
@@ -244,6 +253,7 @@ var switchBits = [...]struct{ byteIdx, bit int }{
 }
 
 func (p *Panel) readLoop() {
+	defer close(p.done)
 	buf := make([]byte, 4)
 	prev := p.initialState
 

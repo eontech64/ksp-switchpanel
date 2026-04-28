@@ -1,6 +1,6 @@
 package main
 
-const version = "1.0.0"
+const version = "1.2.0"
 
 // Changelog:
 // 0.1.0 - Switch panel support via hidapi (IOKit on macOS) + kRPC bridge
@@ -13,3 +13,5 @@ const version = "1.0.0"
 // 0.8.0 - Auto-reconnect kRPC and re-acquire vessel between missions
 // 0.9.0 - GUI binary (ksp-switchpanel-ui) with status window; kRPC retry 1s
 // 1.0.0 - Rotary → SAS mode; MechJeb AP integration; switch memory; panels blank on disconnect
+// 1.1.0 - Multi panel (Flight Multi Panel) support: AP/HDG/ALT/VS/IAS holds + encoder + display
+// 1.2.0 - Hot-plug: starts without any panel connected; panels detected/recovered automatically

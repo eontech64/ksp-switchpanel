@@ -68,6 +68,8 @@ type Panel struct {
 	dev          *hid.Device
 	switchCh     chan SwitchEvent
 	quit         chan struct{}
+	done         chan struct{} // closed when readLoop exits (device disconnected or Close called)
+	closeOnce    sync.Once
 	mu           sync.Mutex
 	ledState     byte
 	initialState [3]byte
@@ -87,6 +89,7 @@ func Open() (*Panel, error) {
 		dev:      dev,
 		switchCh: make(chan SwitchEvent, 32),
 		quit:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	buf := make([]byte, 4)
 	if n, err := p.dev.ReadWithTimeout(buf, 300*time.Millisecond); err == nil && n >= 3 {
@@ -99,9 +102,15 @@ func Open() (*Panel, error) {
 
 // Close releases the device.
 func (p *Panel) Close() {
-	close(p.quit)
+	p.closeOnce.Do(func() { close(p.quit) })
 	p.dev.Close()
 	hid.Exit()
+}
+
+// Done returns a channel that is closed when the panel's read loop exits.
+// This happens either when Close is called or when the device is disconnected.
+func (p *Panel) Done() <-chan struct{} {
+	return p.done
 }
 
 // SwitchCh returns the channel that emits switch events.
@@ -160,6 +169,7 @@ var switchBits = [...]struct{ byteIdx, bit int }{
 }
 
 func (p *Panel) readLoop() {
+	defer close(p.done)
 	buf := make([]byte, 4) // hidapi may prepend a report ID byte
 	prev := p.initialState
 
