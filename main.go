@@ -268,12 +268,19 @@ func main() {
 		}
 
 		mj := mechjeb.New(client)
-		ap, err := mj.AirplaneAutopilot()
-		if err != nil {
-			log.Printf("MechJeb AirplaneAutopilot not available: %v", err)
-			ap = nil
+		var ap *mechjeb.AirplaneAutopilot
+		if ready, err := mj.APIReady(); err != nil {
+			log.Printf("MechJeb service not available (is KRPC.MechJeb installed?): %v", err)
+		} else if !ready {
+			log.Println("MechJeb service found but APIReady=false (MechJeb not loaded yet?)")
 		} else {
-			log.Println("MechJeb AirplaneAutopilot ready.")
+			log.Println("MechJeb APIReady=true, getting AirplaneAutopilot...")
+			if a, err := mj.AirplaneAutopilot(); err != nil {
+				log.Printf("MechJeb AirplaneAutopilot unavailable: %v", err)
+			} else {
+				ap = a
+				log.Println("MechJeb AirplaneAutopilot ready.")
+			}
 		}
 
 		log.Println("Ready.")

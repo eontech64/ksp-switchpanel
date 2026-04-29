@@ -275,11 +275,30 @@ func RunBridge(
 		reapplySwitches(switchPos, cfg.Switches, control)
 
 		mj := mechjeb.New(client)
-		ap, err := mj.AirplaneAutopilot()
-		if err != nil {
-			ap = nil
-		} else {
-			log.Println("MechJeb AirplaneAutopilot ready.")
+		var ap *mechjeb.AirplaneAutopilot
+		// MechJeb initializes asynchronously in LateUpdate; retry for up to 5 seconds.
+		for retry := 0; retry <= 5; retry++ {
+			ready, err := mj.APIReady()
+			if err != nil {
+				log.Printf("MechJeb service not available (is KRPC.MechJeb installed?): %v", err)
+				break
+			}
+			if ready {
+				log.Println("MechJeb APIReady=true, getting AirplaneAutopilot...")
+				if a, err := mj.AirplaneAutopilot(); err != nil {
+					log.Printf("MechJeb AirplaneAutopilot unavailable: %v", err)
+				} else {
+					ap = a
+					log.Println("MechJeb AirplaneAutopilot ready.")
+				}
+				break
+			}
+			if retry < 5 {
+				log.Printf("MechJeb APIReady=false, waiting for MechJeb to initialize (%d/5)...", retry+1)
+				time.Sleep(1 * time.Second)
+			} else {
+				log.Println("MechJeb APIReady=false after retries — MechJeb not loaded or no MechJeb part on vessel.")
+			}
 		}
 
 		name, _ := vessel.Name()
