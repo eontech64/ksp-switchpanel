@@ -788,6 +788,13 @@ func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.A
 		if err != nil {
 			return
 		}
+		if !enabled {
+			// Set a default bank angle of 30° if it's currently 0 (MechJeb won't turn otherwise)
+			if bank, err := ap.BankAngle(); err == nil && bank == 0 {
+				ap.SetBankAngle(30)
+				log.Printf("Multi BankAngle defaulted to 30°")
+			}
+		}
 		ap.SetHeadingHoldEnabled(!enabled)
 		log.Printf("Multi HeadingHold: %v", !enabled)
 	case multipanel.BtnALT:
@@ -801,6 +808,13 @@ func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.A
 		enabled, err := ap.VertSpeedHoldEnabled()
 		if err != nil {
 			return
+		}
+		if !enabled {
+			// Set a default VS target of 50 m/s if it's currently 0
+			if vs, err := ap.VertSpeedTarget(); err == nil && vs == 0 {
+				ap.SetVertSpeedTarget(50)
+				log.Printf("Multi VertSpeedTarget defaulted to 50 m/s")
+			}
 		}
 		ap.SetVertSpeedHoldEnabled(!enabled)
 		log.Printf("Multi VertSpeedHold: %v", !enabled)
@@ -819,7 +833,7 @@ func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.A
 }
 
 // adjustMultiTarget nudges the MechJeb target for the given mode by one step.
-// Step sizes: ALT ±100 m, VS ±1 m/s, IAS ±1 m/s, HDG/CRS ±1°.
+// Step sizes: ALT ±100 m, VS ±1 m/s, IAS ±1 m/s, HDG ±1°, CRS ±1° bank angle.
 func adjustMultiTarget(ap *mechjeb.AirplaneAutopilot, rotMode string, direction float64) {
 	switch rotMode {
 	case "ALT":
@@ -851,7 +865,7 @@ func adjustMultiTarget(ap *mechjeb.AirplaneAutopilot, rotMode string, direction 
 		}
 		ap.SetSpeedTarget(next)
 		log.Printf("Multi SpeedTarget: %.0f m/s", next)
-	case "HDG", "CRS":
+	case "HDG":
 		current, err := ap.HeadingTarget()
 		if err != nil {
 			return
@@ -865,6 +879,20 @@ func adjustMultiTarget(ap *mechjeb.AirplaneAutopilot, rotMode string, direction 
 		}
 		ap.SetHeadingTarget(next)
 		log.Printf("Multi HeadingTarget: %.0f°", next)
+	case "CRS":
+		current, err := ap.BankAngle()
+		if err != nil {
+			return
+		}
+		next := current + direction
+		if next < 0 {
+			next = 0
+		}
+		if next > 90 {
+			next = 90
+		}
+		ap.SetBankAngle(next)
+		log.Printf("Multi BankAngle: %.0f°", next)
 	}
 }
 
@@ -954,12 +982,23 @@ func updateMultiDisplay(mp *multipanel.Panel, vessel *spacecenter.Vessel, ap *me
 		}
 		mp.DisplayInt(multipanel.Row1, int(target))
 		mp.DisplayInt(multipanel.Row2, int(actual))
-	case "HDG", "CRS":
+	case "HDG":
 		target, err := ap.HeadingTarget()
 		if err != nil {
 			return false
 		}
 		actual, err := flight.Heading()
+		if err != nil {
+			return false
+		}
+		mp.DisplayInt(multipanel.Row1, int(target))
+		mp.DisplayInt(multipanel.Row2, int(actual))
+	case "CRS":
+		target, err := ap.BankAngle()
+		if err != nil {
+			return false
+		}
+		actual, err := flight.Roll()
 		if err != nil {
 			return false
 		}
