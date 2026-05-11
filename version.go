@@ -1,6 +1,9 @@
 package main
 
-const version = "1.2.1"
+import "ksp-switchpanel/internal/version"
+
+// version is the single source of truth; defined in internal/version/version.go.
+const appVersion = version.Version
 
 // Changelog:
 // 0.1.0 - Switch panel support via hidapi (IOKit on macOS) + kRPC bridge
@@ -16,3 +19,6 @@ const version = "1.2.1"
 // 1.1.0 - Multi panel (Flight Multi Panel) support: AP/HDG/ALT/VS/IAS holds + encoder + display
 // 1.2.0 - Hot-plug: starts without any panel connected; panels detected/recovered automatically
 // 1.2.1 - Fix HDG hold: enable RollHold alongside HeadingHold so MechJeb actually banks the plane
+// 1.2.2 - AT=OFF mode: multi panel buttons select SmartASS SAS modes instead of airplane AP
+// 1.2.3 - Radio panel shows clock (DD.MM / YYYY / HH.MM / SS) while kRPC is disconnected
+// 1.2.4 - Fix action group indexing: kRPC is 0-based so config 1-10 now maps to KSP AG1-AG10

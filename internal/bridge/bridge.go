@@ -251,6 +251,7 @@ func RunBridge(
 		if err := client.Connect(ctx); err != nil {
 			log.Printf("kRPC connect failed: %v — retrying in 1s...", err)
 			cancelCtx()
+			showClock(radioPanel)
 			select {
 			case <-quitCh:
 				closePanels(swPanel, radioPanel, multiPanel)
@@ -263,7 +264,7 @@ func RunBridge(
 		send(BridgeStatus{SwitchPanel: hasSW, RadioPanel: hasRD, MultiPanel: hasMU, KRPC: "connected"})
 
 		sc := spacecenter.New(client)
-		vessel, control, ok := waitForVessel(sc, swPanel, quitCh)
+		vessel, control, ok := waitForVessel(sc, swPanel, radioPanel, quitCh)
 		if !ok {
 			client.Close()
 			cancelCtx()
@@ -276,6 +277,7 @@ func RunBridge(
 
 		mj := mechjeb.New(client)
 		var ap *mechjeb.AirplaneAutopilot
+		var smartass *mechjeb.SmartASS
 		// MechJeb initializes asynchronously in LateUpdate; retry for up to 5 seconds.
 		for retry := 0; retry <= 5; retry++ {
 			ready, err := mj.APIReady()
@@ -284,12 +286,18 @@ func RunBridge(
 				break
 			}
 			if ready {
-				log.Println("MechJeb APIReady=true, getting AirplaneAutopilot...")
+				log.Println("MechJeb APIReady=true, getting AirplaneAutopilot and SmartASS...")
 				if a, err := mj.AirplaneAutopilot(); err != nil {
 					log.Printf("MechJeb AirplaneAutopilot unavailable: %v", err)
 				} else {
 					ap = a
 					log.Println("MechJeb AirplaneAutopilot ready.")
+				}
+				if s, err := mj.SmartASS(); err != nil {
+					log.Printf("MechJeb SmartASS unavailable: %v", err)
+				} else {
+					smartass = s
+					log.Println("MechJeb SmartASS ready.")
 				}
 				break
 			}
@@ -306,7 +314,7 @@ func RunBridge(
 		send(base)
 
 		log.Println("Ready.")
-		vesselLost := runSession(ctx, vessel, control, ap, swPanel, radioPanel, multiPanel, cfg,
+		vesselLost := runSession(ctx, vessel, control, ap, smartass, swPanel, radioPanel, multiPanel, cfg,
 			swCh, radioCh, multiCh, ticker.C, quitCh, &rot1Mode, &rot2Mode, &multiRotMode,
 			statusCh, base, switchPos)
 
@@ -355,11 +363,29 @@ func closePanels(swPanel *switchpanel.Panel, radioPanel *radiopanel.Panel, multi
 	}
 }
 
-func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, quitCh <-chan struct{}) (*spacecenter.Vessel, *spacecenter.Control, bool) {
+// showClock writes the current local time to the radio panel's four displays.
+//
+//	Display1Active  (top-left):    DD.MM  — day and month
+//	Display1Standby (top-right):   YYYY   — year
+//	Display2Active  (bottom-left): HH.MM  — hour and minute
+//	Display2Standby (bottom-right): SS    — seconds (live pulse)
+func showClock(rp *radiopanel.Panel) {
+	if rp == nil {
+		return
+	}
+	now := time.Now()
+	rp.DisplayString(radiopanel.Display1Active, fmt.Sprintf("%02d.%02d", now.Day(), int(now.Month())))
+	rp.DisplayString(radiopanel.Display1Standby, fmt.Sprintf("%d", now.Year()))
+	rp.DisplayString(radiopanel.Display2Active, fmt.Sprintf("%02d.%02d", now.Hour(), now.Minute()))
+	rp.DisplayString(radiopanel.Display2Standby, fmt.Sprintf("%02d", now.Second()))
+}
+
+func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, radioPanel *radiopanel.Panel, quitCh <-chan struct{}) (*spacecenter.Vessel, *spacecenter.Control, bool) {
 	log.Println("Waiting for active vessel...")
 	for {
 		vessel, err := sc.ActiveVessel()
 		if err != nil {
+			showClock(radioPanel)
 			select {
 			case <-quitCh:
 				return nil, nil, false
@@ -369,6 +395,7 @@ func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, quit
 		}
 		control, err := vessel.Control()
 		if err != nil {
+			showClock(radioPanel)
 			select {
 			case <-quitCh:
 				return nil, nil, false
@@ -390,6 +417,7 @@ func runSession(
 	vessel *spacecenter.Vessel,
 	control *spacecenter.Control,
 	ap *mechjeb.AirplaneAutopilot,
+	smartass *mechjeb.SmartASS,
 	swPanel *switchpanel.Panel,
 	radioPanel *radiopanel.Panel,
 	multiPanel *multipanel.Panel,
@@ -408,6 +436,7 @@ func runSession(
 	errCount := 0
 	const maxErrors = 3
 	gearState := &gearLEDState{}
+	atArmed := false // tracks AUTO THROTTLE switch: true=ARM, false=OFF
 
 	sendStatus := func(s BridgeStatus) {
 		select {
@@ -454,8 +483,12 @@ func runSession(
 				handleAutopilot(ev, ap)
 			}
 		case ev := <-multiCh:
-			if ap != nil {
-				handleMultiSwitch(ev, multiRotMode, ap)
+			// AutoThrottle position is tracked regardless of MechJeb availability.
+			if ev.Switch == multipanel.AutoThrottle {
+				atArmed = ev.On
+				log.Printf("Multi AutoThrottle: armed=%v", ev.On)
+			} else if ap != nil {
+				handleMultiSwitch(ev, multiRotMode, ap, smartass, atArmed)
 			}
 		case <-tickC:
 			tickOK := true
@@ -466,7 +499,15 @@ func runSession(
 				tickOK = false
 			}
 			if multiPanel != nil && ap != nil {
-				if !syncMultiLEDs(multiPanel, ap) || !updateMultiDisplay(multiPanel, vessel, ap, *multiRotMode) {
+				ledOK := syncMultiLEDs(multiPanel, ap, smartass, atArmed)
+				var dispOK bool
+				if atArmed {
+					dispOK = updateMultiDisplay(multiPanel, vessel, ap, *multiRotMode)
+				} else {
+					multiPanel.DisplayOff()
+					dispOK = true
+				}
+				if !ledOK || !dispOK {
 					tickOK = false
 				}
 			}
@@ -518,7 +559,11 @@ func handleSwitch(ev switchpanel.SwitchEvent, switchCfg map[string]string, ctrl 
 		if err != nil {
 			return
 		}
-		ctrl.SetActionGroup(uint32(n), on)
+		// kRPC action groups are 0-indexed (0=AG1 … 9=AG10); config uses 1-10.
+		if n < 1 || n > 10 {
+			return
+		}
+		ctrl.SetActionGroup(uint32(n-1), on)
 	case strings.HasPrefix(action, "sas_mode:") && on:
 		sasModeLookup := map[string]spacecenter.SASMode{
 			"stability_assist": spacecenter.SASMode_StabilityAssist,
@@ -755,9 +800,14 @@ func radioModeNameStr(id radiopanel.SwitchID) string {
 	return fmt.Sprintf("mode %d", id)
 }
 
-// handleMultiSwitch dispatches a multi panel event to MechJeb airplane autopilot.
-func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.AirplaneAutopilot) {
+// handleMultiSwitch dispatches a multi panel event to MechJeb airplane autopilot (AT=ARM)
+// or SmartASS SAS mode selection (AT=OFF).
+func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.AirplaneAutopilot, smartass *mechjeb.SmartASS, atArmed bool) {
 	if !ev.On {
+		return
+	}
+	if !atArmed {
+		handleMultiSmartASS(ev, smartass)
 		return
 	}
 	switch ev.Switch {
@@ -900,9 +950,42 @@ func adjustMultiTarget(ap *mechjeb.AirplaneAutopilot, rotMode string, direction 
 	}
 }
 
-// syncMultiLEDs lights the button LEDs that match active MechJeb hold modes.
+// syncMultiLEDs lights the button LEDs that match active MechJeb hold modes (AT=ARM)
+// or the active SmartASS mode (AT=OFF).
 // Returns false if any kRPC call fails.
-func syncMultiLEDs(mp *multipanel.Panel, ap *mechjeb.AirplaneAutopilot) bool {
+func syncMultiLEDs(mp *multipanel.Panel, ap *mechjeb.AirplaneAutopilot, smartass *mechjeb.SmartASS, atArmed bool) bool {
+	if !atArmed {
+		if smartass == nil {
+			mp.SetLEDs(0)
+			return true
+		}
+		mode, err := smartass.AutopilotMode()
+		if err != nil {
+			return false
+		}
+		var leds byte
+		switch mode {
+		case mechjeb.SmartASSAutopilotMode_Node:
+			leds = multipanel.LEDAP
+		case mechjeb.SmartASSAutopilotMode_Prograde:
+			leds = multipanel.LEDHDG
+		case mechjeb.SmartASSAutopilotMode_Retrograde:
+			leds = multipanel.LEDNAV
+		case mechjeb.SmartASSAutopilotMode_NormalPlus:
+			leds = multipanel.LEDIAS
+		case mechjeb.SmartASSAutopilotMode_NormalMinus:
+			leds = multipanel.LEDALT
+		case mechjeb.SmartASSAutopilotMode_RadialPlus:
+			leds = multipanel.LEDVS
+		case mechjeb.SmartASSAutopilotMode_TargetPlus:
+			leds = multipanel.LEDAPR
+		case mechjeb.SmartASSAutopilotMode_TargetMinus:
+			leds = multipanel.LEDREV
+		}
+		mp.SetLEDs(leds)
+		return true
+	}
+
 	var leds byte
 	if on, err := ap.Enabled(); err != nil {
 		return false
@@ -931,6 +1014,55 @@ func syncMultiLEDs(mp *multipanel.Panel, ap *mechjeb.AirplaneAutopilot) bool {
 	}
 	mp.SetLEDs(leds)
 	return true
+}
+
+// handleMultiSmartASS maps multi panel buttons to SmartASS SAS modes (AT=OFF).
+// Pressing the active mode again turns SmartASS off.
+func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS) {
+	if smartass == nil {
+		return
+	}
+	var mode mechjeb.SmartASSAutopilotMode
+	var iface mechjeb.SmartASSInterfaceMode
+	switch ev.Switch {
+	case multipanel.BtnAP:
+		mode = mechjeb.SmartASSAutopilotMode_Node
+		iface = mechjeb.SmartASSInterfaceMode_Orbital
+	case multipanel.BtnHDG:
+		mode = mechjeb.SmartASSAutopilotMode_Prograde
+		iface = mechjeb.SmartASSInterfaceMode_Orbital
+	case multipanel.BtnNAV:
+		mode = mechjeb.SmartASSAutopilotMode_Retrograde
+		iface = mechjeb.SmartASSInterfaceMode_Orbital
+	case multipanel.BtnIAS:
+		mode = mechjeb.SmartASSAutopilotMode_NormalPlus
+		iface = mechjeb.SmartASSInterfaceMode_Orbital
+	case multipanel.BtnALT:
+		mode = mechjeb.SmartASSAutopilotMode_NormalMinus
+		iface = mechjeb.SmartASSInterfaceMode_Orbital
+	case multipanel.BtnVS:
+		mode = mechjeb.SmartASSAutopilotMode_RadialPlus
+		iface = mechjeb.SmartASSInterfaceMode_Orbital
+	case multipanel.BtnAPR:
+		mode = mechjeb.SmartASSAutopilotMode_TargetPlus
+		iface = mechjeb.SmartASSInterfaceMode_Target
+	case multipanel.BtnREV:
+		mode = mechjeb.SmartASSAutopilotMode_TargetMinus
+		iface = mechjeb.SmartASSInterfaceMode_Target
+	default:
+		return
+	}
+	// Toggle: pressing the active mode again turns SmartASS off.
+	if cur, err := smartass.AutopilotMode(); err == nil && cur == mode {
+		smartass.SetAutopilotMode(mechjeb.SmartASSAutopilotMode_Off)
+		smartass.Update(false)
+		log.Printf("SmartASS: Off")
+		return
+	}
+	smartass.SetInterfaceMode(iface)
+	smartass.SetAutopilotMode(mode)
+	smartass.Update(false)
+	log.Printf("SmartASS: %v", mode)
 }
 
 // updateMultiDisplay writes target (Row1) and actual (Row2) for the current rotary mode.

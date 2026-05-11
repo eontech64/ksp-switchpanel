@@ -13,12 +13,13 @@ import (
 
 	"ksp-switchpanel/config"
 	"ksp-switchpanel/internal/bridge"
+	"ksp-switchpanel/internal/version"
 )
 
-const version = "1.2.0"
+const appVersion = version.Version
 
 func main() {
-	log.Printf("KSP panels bridge (UI) v%s starting...", version)
+	log.Printf("KSP panels bridge (UI) v%s starting...", appVersion)
 
 	cfg, err := config.FindAndLoad()
 	if err != nil {
@@ -35,7 +36,7 @@ func main() {
 
 func runUI(statusCh <-chan bridge.BridgeStatus, quitCh chan struct{}) {
 	a := app.New()
-	w := a.NewWindow("KSP Panel Bridge  v" + version)
+	w := a.NewWindow("KSP Panel Bridge  v" + appVersion)
 	w.Resize(fyne.NewSize(320, 410))
 	w.SetFixedSize(true)
 
@@ -118,7 +119,7 @@ func runUI(statusCh <-chan bridge.BridgeStatus, quitCh chan struct{}) {
 
 	// UI layout
 	title := widget.NewLabelWithStyle(
-		"KSP Panel Bridge  v"+version,
+		"KSP Panel Bridge  v"+appVersion,
 		fyne.TextAlignCenter,
 		fyne.TextStyle{Bold: true},
 	)

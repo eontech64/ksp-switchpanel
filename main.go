@@ -132,7 +132,7 @@ var telemetryFns = map[string]telemetryFn{
 }
 
 func main() {
-	log.Printf("KSP panels bridge v%s starting...", version)
+	log.Printf("KSP panels bridge v%s starting...", appVersion)
 
 	cfg, err := config.FindAndLoad()
 	if err != nil {
