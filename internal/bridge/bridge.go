@@ -796,6 +796,10 @@ func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.A
 			}
 		}
 		ap.SetHeadingHoldEnabled(!enabled)
+		// MechJeb's EnableHeadingHold() always sets RollHoldEnabled too — roll PID is
+		// what actually banks the plane; without it HeadingHold computes RealRollTarget
+		// but never sends it to the flight controls.
+		ap.SetRollHoldEnabled(!enabled)
 		log.Printf("Multi HeadingHold: %v", !enabled)
 	case multipanel.BtnALT:
 		enabled, err := ap.AltitudeHoldEnabled()

@@ -1,6 +1,6 @@
 package main
 
-const version = "1.2.0"
+const version = "1.2.1"
 
 // Changelog:
 // 0.1.0 - Switch panel support via hidapi (IOKit on macOS) + kRPC bridge
@@ -15,3 +15,4 @@ const version = "1.2.0"
 // 1.0.0 - Rotary → SAS mode; MechJeb AP integration; switch memory; panels blank on disconnect
 // 1.1.0 - Multi panel (Flight Multi Panel) support: AP/HDG/ALT/VS/IAS holds + encoder + display
 // 1.2.0 - Hot-plug: starts without any panel connected; panels detected/recovered automatically
+// 1.2.1 - Fix HDG hold: enable RollHold alongside HeadingHold so MechJeb actually banks the plane
