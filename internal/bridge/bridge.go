@@ -1065,10 +1065,10 @@ func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, 
 	}
 	smartass.SetInterfaceMode(iface)
 	smartass.SetAutopilotMode(mode)
-	smartass.Update(false)
 	if ctrl != nil {
 		ctrl.SetSAS(true)
 	}
+	smartass.Update(false)
 	log.Printf("SmartASS: %v", mode)
 }
 
