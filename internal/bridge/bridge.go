@@ -1031,11 +1031,22 @@ func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, 
 		mode = mechjeb.SmartASSAutopilotMode_Node
 		iface = mechjeb.SmartASSInterfaceMode_Orbital
 	case multipanel.BtnHDG:
-		mode = mechjeb.SmartASSAutopilotMode_Prograde
-		iface = mechjeb.SmartASSInterfaceMode_Orbital
+		// Follow current interface mode: Target prograde when in Target, else orbital.
+		if cur, err := smartass.InterfaceMode(); err == nil && cur == mechjeb.SmartASSInterfaceMode_Target {
+			mode = mechjeb.SmartASSAutopilotMode_TargetPlus
+			iface = mechjeb.SmartASSInterfaceMode_Target
+		} else {
+			mode = mechjeb.SmartASSAutopilotMode_Prograde
+			iface = mechjeb.SmartASSInterfaceMode_Orbital
+		}
 	case multipanel.BtnNAV:
-		mode = mechjeb.SmartASSAutopilotMode_Retrograde
-		iface = mechjeb.SmartASSInterfaceMode_Orbital
+		if cur, err := smartass.InterfaceMode(); err == nil && cur == mechjeb.SmartASSInterfaceMode_Target {
+			mode = mechjeb.SmartASSAutopilotMode_TargetMinus
+			iface = mechjeb.SmartASSInterfaceMode_Target
+		} else {
+			mode = mechjeb.SmartASSAutopilotMode_Retrograde
+			iface = mechjeb.SmartASSInterfaceMode_Orbital
+		}
 	case multipanel.BtnIAS:
 		mode = mechjeb.SmartASSAutopilotMode_NormalPlus
 		iface = mechjeb.SmartASSInterfaceMode_Orbital

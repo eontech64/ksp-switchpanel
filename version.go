@@ -27,3 +27,4 @@ const appVersion = version.Version
 // 1.2.7 - Fix SmartASS SAS enable: set SAS before Update() so MechJeb doesn't override it
 // 1.2.8 - SmartASS: ForceRoll=true + SurfaceRoll=0 to stop vessel spinning on its own axis
 // 1.2.9 - SmartASS: guard APR/REV — log and skip if no target selected; log iface on activate
+// 1.2.10 - SmartASS HDG/NAV follow current interface: Target pro/retrograde when in Target mode
