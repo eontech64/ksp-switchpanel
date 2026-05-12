@@ -488,7 +488,7 @@ func runSession(
 				atArmed = ev.On
 				log.Printf("Multi AutoThrottle: armed=%v", ev.On)
 			} else if ap != nil {
-				handleMultiSwitch(ev, multiRotMode, ap, smartass, atArmed)
+				handleMultiSwitch(ev, multiRotMode, ap, smartass, atArmed, control)
 			}
 		case <-tickC:
 			tickOK := true
@@ -802,12 +802,12 @@ func radioModeNameStr(id radiopanel.SwitchID) string {
 
 // handleMultiSwitch dispatches a multi panel event to MechJeb airplane autopilot (AT=ARM)
 // or SmartASS SAS mode selection (AT=OFF).
-func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.AirplaneAutopilot, smartass *mechjeb.SmartASS, atArmed bool) {
+func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.AirplaneAutopilot, smartass *mechjeb.SmartASS, atArmed bool, ctrl *spacecenter.Control) {
 	if !ev.On {
 		return
 	}
 	if !atArmed {
-		handleMultiSmartASS(ev, smartass)
+		handleMultiSmartASS(ev, smartass, ctrl)
 		return
 	}
 	switch ev.Switch {
@@ -1018,7 +1018,8 @@ func syncMultiLEDs(mp *multipanel.Panel, ap *mechjeb.AirplaneAutopilot, smartass
 
 // handleMultiSmartASS maps multi panel buttons to SmartASS SAS modes (AT=OFF).
 // Pressing the active mode again turns SmartASS off.
-func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS) {
+// SAS is enabled when a mode is activated and disabled when SmartASS is turned off.
+func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, ctrl *spacecenter.Control) {
 	if smartass == nil {
 		return
 	}
@@ -1056,12 +1057,18 @@ func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS) 
 	if cur, err := smartass.AutopilotMode(); err == nil && cur == mode {
 		smartass.SetAutopilotMode(mechjeb.SmartASSAutopilotMode_Off)
 		smartass.Update(false)
+		if ctrl != nil {
+			ctrl.SetSAS(false)
+		}
 		log.Printf("SmartASS: Off")
 		return
 	}
 	smartass.SetInterfaceMode(iface)
 	smartass.SetAutopilotMode(mode)
 	smartass.Update(false)
+	if ctrl != nil {
+		ctrl.SetSAS(true)
+	}
 	log.Printf("SmartASS: %v", mode)
 }
 
