@@ -25,3 +25,4 @@ const appVersion = version.Version
 // 1.2.5 - SmartASS mode buttons enable SAS; toggling off disables SAS
 // 1.2.6 - Navball second screen: cmd/navball SSE server + Three.js page (port 8585)
 // 1.2.7 - Fix SmartASS SAS enable: set SAS before Update() so MechJeb doesn't override it
+// 1.2.8 - SmartASS: ForceRoll=true + SurfaceRoll=0 to stop vessel spinning on its own axis

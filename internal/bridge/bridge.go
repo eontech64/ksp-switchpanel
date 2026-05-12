@@ -1055,6 +1055,7 @@ func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, 
 	}
 	// Toggle: pressing the active mode again turns SmartASS off.
 	if cur, err := smartass.AutopilotMode(); err == nil && cur == mode {
+		smartass.SetForceRoll(false)
 		smartass.SetAutopilotMode(mechjeb.SmartASSAutopilotMode_Off)
 		smartass.Update(false)
 		if ctrl != nil {
@@ -1065,6 +1066,9 @@ func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, 
 	}
 	smartass.SetInterfaceMode(iface)
 	smartass.SetAutopilotMode(mode)
+	// Lock roll to 0° so the vessel doesn't spin on its own axis.
+	smartass.SetForceRoll(true)
+	smartass.SetSurfaceRoll(0)
 	if ctrl != nil {
 		ctrl.SetSAS(true)
 	}
