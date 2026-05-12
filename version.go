@@ -26,3 +26,4 @@ const appVersion = version.Version
 // 1.2.6 - Navball second screen: cmd/navball SSE server + Three.js page (port 8585)
 // 1.2.7 - Fix SmartASS SAS enable: set SAS before Update() so MechJeb doesn't override it
 // 1.2.8 - SmartASS: ForceRoll=true + SurfaceRoll=0 to stop vessel spinning on its own axis
+// 1.2.9 - SmartASS: guard APR/REV — log and skip if no target selected; log iface on activate

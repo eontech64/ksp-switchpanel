@@ -314,7 +314,7 @@ func RunBridge(
 		send(base)
 
 		log.Println("Ready.")
-		vesselLost := runSession(ctx, vessel, control, ap, smartass, swPanel, radioPanel, multiPanel, cfg,
+		vesselLost := runSession(ctx, sc, vessel, control, ap, smartass, swPanel, radioPanel, multiPanel, cfg,
 			swCh, radioCh, multiCh, ticker.C, quitCh, &rot1Mode, &rot2Mode, &multiRotMode,
 			statusCh, base, switchPos)
 
@@ -414,6 +414,7 @@ func waitForVessel(sc *spacecenter.SpaceCenter, swPanel *switchpanel.Panel, radi
 
 func runSession(
 	ctx context.Context,
+	sc *spacecenter.SpaceCenter,
 	vessel *spacecenter.Vessel,
 	control *spacecenter.Control,
 	ap *mechjeb.AirplaneAutopilot,
@@ -488,7 +489,7 @@ func runSession(
 				atArmed = ev.On
 				log.Printf("Multi AutoThrottle: armed=%v", ev.On)
 			} else if ap != nil {
-				handleMultiSwitch(ev, multiRotMode, ap, smartass, atArmed, control)
+				handleMultiSwitch(ev, multiRotMode, ap, smartass, atArmed, control, sc)
 			}
 		case <-tickC:
 			tickOK := true
@@ -802,12 +803,12 @@ func radioModeNameStr(id radiopanel.SwitchID) string {
 
 // handleMultiSwitch dispatches a multi panel event to MechJeb airplane autopilot (AT=ARM)
 // or SmartASS SAS mode selection (AT=OFF).
-func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.AirplaneAutopilot, smartass *mechjeb.SmartASS, atArmed bool, ctrl *spacecenter.Control) {
+func handleMultiSwitch(ev multipanel.SwitchEvent, rotMode *string, ap *mechjeb.AirplaneAutopilot, smartass *mechjeb.SmartASS, atArmed bool, ctrl *spacecenter.Control, sc *spacecenter.SpaceCenter) {
 	if !ev.On {
 		return
 	}
 	if !atArmed {
-		handleMultiSmartASS(ev, smartass, ctrl)
+		handleMultiSmartASS(ev, smartass, ctrl, sc)
 		return
 	}
 	switch ev.Switch {
@@ -1019,7 +1020,7 @@ func syncMultiLEDs(mp *multipanel.Panel, ap *mechjeb.AirplaneAutopilot, smartass
 // handleMultiSmartASS maps multi panel buttons to SmartASS SAS modes (AT=OFF).
 // Pressing the active mode again turns SmartASS off.
 // SAS is enabled when a mode is activated and disabled when SmartASS is turned off.
-func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, ctrl *spacecenter.Control) {
+func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, ctrl *spacecenter.Control, sc *spacecenter.SpaceCenter) {
 	if smartass == nil {
 		return
 	}
@@ -1053,6 +1054,22 @@ func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, 
 	default:
 		return
 	}
+	// For Target modes, verify a target is actually selected.
+	if iface == mechjeb.SmartASSInterfaceMode_Target && sc != nil {
+		hasTarget := false
+		if v, err := sc.TargetVessel(); err == nil && v != nil {
+			hasTarget = true
+		}
+		if !hasTarget {
+			if b, err := sc.TargetBody(); err == nil && b != nil {
+				hasTarget = true
+			}
+		}
+		if !hasTarget {
+			log.Printf("SmartASS: no target selected — APR/REV require a target")
+			return
+		}
+	}
 	// Toggle: pressing the active mode again turns SmartASS off.
 	if cur, err := smartass.AutopilotMode(); err == nil && cur == mode {
 		smartass.SetForceRoll(false)
@@ -1073,7 +1090,7 @@ func handleMultiSmartASS(ev multipanel.SwitchEvent, smartass *mechjeb.SmartASS, 
 		ctrl.SetSAS(true)
 	}
 	smartass.Update(false)
-	log.Printf("SmartASS: %v", mode)
+	log.Printf("SmartASS: %v (iface=%v)", mode, iface)
 }
 
 // updateMultiDisplay writes target (Row1) and actual (Row2) for the current rotary mode.
