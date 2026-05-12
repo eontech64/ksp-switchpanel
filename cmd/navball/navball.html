@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>KSP Navball</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-family: 'Courier New', monospace;
+  color: #eee;
+  user-select: none;
+}
+#canvas-wrap {
+  position: relative;
+  width: 300px;
+  height: 300px;
+}
+canvas { display: block; }
+#overlay {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+/* Roll arc indicator */
+#roll-arc {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+}
+#readout {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  width: 300px;
+  text-align: center;
+}
+.val-box {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 6px 4px;
+}
+.val-label { font-size: 10px; color: #888; letter-spacing: 1px; }
+.val-num { font-size: 18px; font-weight: bold; color: #cfd; }
+#status {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #666;
+}
+</style>
+</head>
+<body>
+
+<div id="canvas-wrap">
+  <canvas id="c" width="300" height="300"></canvas>
+  <!-- Roll arc drawn over Three.js canvas -->
+  <svg id="roll-arc" viewBox="0 0 300 300">
+    <!-- static tick marks at 0°, ±30°, ±60°, ±90°, ±120°, ±150°, 180° -->
+    <g id="arc-ticks" fill="none" stroke="#aaa" stroke-width="1.5"></g>
+    <!-- pointer triangle (rotates) — default up = 0° roll -->
+    <polygon id="roll-pointer" points="150,12 144,24 156,24" fill="#fff" transform="rotate(0,150,150)"/>
+  </svg>
+</div>
+
+<div id="readout">
+  <div class="val-box"><div class="val-label">HDG</div><div class="val-num" id="v-hdg">---</div></div>
+  <div class="val-box"><div class="val-label">PIT</div><div class="val-num" id="v-pit">---</div></div>
+  <div class="val-box"><div class="val-label">ROL</div><div class="val-num" id="v-rol">---</div></div>
+  <div class="val-box"><div class="val-label">m/s</div><div class="val-num" id="v-spd">---</div></div>
+</div>
+
+<div id="status">Connecting...</div>
+
+<!-- Three.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ── Three.js scene ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(300, 300);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+camera.position.set(0, 0, 3);
+
+// Navball sphere — coloured by local normal y-component (blue=sky, brown=ground)
+const VERT = `
+varying vec3 vNorm;
+void main() {
+  vNorm = normalize(normalMatrix * normal);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+// We want coloring based on the OBJECT-SPACE normal so it rotates with the sphere.
+// Pass both object-space and eye-space normals.
+const VERT2 = `
+varying vec3 vLocalNorm;
+void main() {
+  vLocalNorm = normalize(normal); // object space
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const FRAG = `
+varying vec3 vLocalNorm;
+void main() {
+  // y > 0 = upper hemisphere (sky) = blue; y < 0 = lower (ground) = brown
+  float t = clamp(vLocalNorm.y, -1.0, 1.0);
+  vec3 sky   = vec3(0.10, 0.30, 0.80);
+  vec3 ground= vec3(0.55, 0.30, 0.10);
+  vec3 col = mix(ground, sky, t * 0.5 + 0.5);
+  // horizon band
+  float band = smoothstep(0.0, 0.08, abs(t));
+  col = mix(vec3(0.9, 0.9, 0.9), col, band);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+const ballMat = new THREE.ShaderMaterial({
+  vertexShader: VERT2,
+  fragmentShader: FRAG,
+});
+const ball = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 64), ballMat);
+ball.rotation.order = 'YXZ';
+scene.add(ball);
+
+// Thin black edge ring
+const edgeGeo = new THREE.TorusGeometry(1.01, 0.012, 8, 128);
+const edgeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+scene.add(new THREE.Mesh(edgeGeo, edgeMat));
+
+// Direction markers — placed in WORLD space (fixed camera-facing sprites)
+// Types: '+' = prograde style (circle+cross), '-' = retrograde style (circle+X)
+const markers = {};
+
+function makeMarker(color, type) {
+  const size = 128;
+  const c2d = document.createElement('canvas');
+  c2d.width = c2d.height = size;
+  const ctx = c2d.getContext('2d');
+  const cx = size/2, r = size * 0.35, lw = size * 0.07;
+  ctx.clearRect(0, 0, size, size);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lw;
+  ctx.beginPath();
+  ctx.arc(cx, cx, r, 0, Math.PI*2);
+  ctx.stroke();
+  if (type === '+') {
+    // cross
+    ctx.beginPath();
+    ctx.moveTo(cx, cx - r*1.4); ctx.lineTo(cx, cx + r*1.4);
+    ctx.moveTo(cx - r*1.4, cx); ctx.lineTo(cx + r*1.4, cx);
+    ctx.stroke();
+  } else {
+    // X
+    const d = r * 0.9;
+    ctx.beginPath();
+    ctx.moveTo(cx-d, cx-d); ctx.lineTo(cx+d, cx+d);
+    ctx.moveTo(cx+d, cx-d); ctx.lineTo(cx-d, cx+d);
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c2d);
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.28, 0.28, 1);
+  scene.add(sprite);
+  return sprite;
+}
+
+markers.prograde   = makeMarker('#ffff00', '+');
+markers.retrograde = makeMarker('#ffff00', '-');
+markers.normal     = makeMarker('#ff80ff', '+');
+markers.antinormal = makeMarker('#ff80ff', '-');
+markers.radial     = makeMarker('#00ffff', '+');
+markers.antiradial = makeMarker('#00ffff', '-');
+
+// Camera always at z=3, looking at origin — sprites project onto front face.
+// A vector v=[x,y,z] in surface frame (x=east,y=up,z=north) → Three.js world (same axes).
+// Visible if dot(v, camera_dir) > 0 where camera_dir = (0,0,-1).
+// So visible when v.z < 0... wait, camera is at +z looking toward origin,
+// so it sees the -z face of the sphere. A world-space direction d is facing camera
+// when d.z > 0 (points toward camera which is at +z).
+
+function updateMarker(sprite, vec3arr) {
+  const [x, y, z] = vec3arr;
+  // Clamp to sphere surface for display
+  const len = Math.sqrt(x*x + y*y + z*z) || 1;
+  const nx = x/len, ny = y/len, nz = z/len;
+  // Visible when pointing toward camera (camera at +z)
+  sprite.visible = nz > 0.05;
+  // Project onto sphere just in front of surface
+  sprite.position.set(nx * 1.05, ny * 1.05, nz * 1.05);
+}
+
+// Ambient + directional light for any non-shader materials
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+// ── Roll arc SVG ticks ────────────────────────────────────────────────────────
+(function buildTicks() {
+  const g = document.getElementById('arc-ticks');
+  const cx = 150, cy = 150, r = 140;
+  const angles = [-150,-120,-90,-60,-30, 0, 30, 60, 90, 120, 150, 180];
+  const longSet = new Set([0, 90, -90, 180]);
+  for (const a of angles) {
+    const rad = (a - 90) * Math.PI / 180; // 0° is top
+    const inner = longSet.has(a) ? r - 14 : r - 8;
+    const x1 = cx + r     * Math.cos(rad);
+    const y1 = cy + r     * Math.sin(rad);
+    const x2 = cx + inner * Math.cos(rad);
+    const y2 = cy + inner * Math.sin(rad);
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+    g.appendChild(line);
+  }
+})();
+
+const rollPointer = document.getElementById('roll-pointer');
+
+// ── Readout elements ──────────────────────────────────────────────────────────
+const vHdg = document.getElementById('v-hdg');
+const vPit = document.getElementById('v-pit');
+const vRol = document.getElementById('v-rol');
+const vSpd = document.getElementById('v-spd');
+const statusEl = document.getElementById('status');
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let state = { connected: false, pitch: 0, heading: 0, roll: 0, speed: 0,
+  prograde:[0,0,1], retrograde:[0,0,-1],
+  normal:[0,1,0], antinormal:[0,-1,0],
+  radial:[1,0,0], antiradial:[-1,0,0] };
+
+function applyState(d) {
+  state = d;
+  if (!d.connected) {
+    statusEl.textContent = 'No vessel';
+    vHdg.textContent = '---';
+    vPit.textContent = '---';
+    vRol.textContent = '---';
+    vSpd.textContent = '---';
+    return;
+  }
+  statusEl.textContent = '';
+  vHdg.textContent = d.heading.toFixed(1) + '°';
+  vPit.textContent = (d.pitch >= 0 ? '+' : '') + d.pitch.toFixed(1) + '°';
+  vRol.textContent = (d.roll >= 0 ? '+' : '') + d.roll.toFixed(1) + '°';
+  vSpd.textContent = d.speed.toFixed(0);
+
+  // Sphere rotation: YXZ order, heading around Y, pitch around X, -roll around Z
+  const deg = Math.PI / 180;
+  ball.rotation.set(d.pitch * deg, d.heading * deg, -d.roll * deg, 'YXZ');
+
+  // Roll pointer: rotates opposite to roll so it stays fixed relative to horizon
+  rollPointer.setAttribute('transform', `rotate(${d.roll}, 150, 150)`);
+
+  updateMarker(markers.prograde,   d.prograde);
+  updateMarker(markers.retrograde, d.retrograde);
+  updateMarker(markers.normal,     d.normal);
+  updateMarker(markers.antinormal, d.antinormal);
+  updateMarker(markers.radial,     d.radial);
+  updateMarker(markers.antiradial, d.antiradial);
+}
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+function connect() {
+  statusEl.textContent = 'Connecting...';
+  const es = new EventSource('/data');
+  es.onmessage = (e) => {
+    try { applyState(JSON.parse(e.data)); } catch(_) {}
+  };
+  es.onerror = () => {
+    statusEl.textContent = 'Reconnecting...';
+    es.close();
+    setTimeout(connect, 2000);
+  };
+}
+connect();
+</script>
+</body>
+</html>

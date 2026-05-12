@@ -23,3 +23,4 @@ const appVersion = version.Version
 // 1.2.3 - Radio panel shows clock (DD.MM / YYYY / HH.MM / SS) while kRPC is disconnected
 // 1.2.4 - Fix action group indexing: kRPC is 0-based so config 1-10 now maps to KSP AG1-AG10
 // 1.2.5 - SmartASS mode buttons enable SAS; toggling off disables SAS
+// 1.2.6 - Navball second screen: cmd/navball SSE server + Three.js page (port 8585)
